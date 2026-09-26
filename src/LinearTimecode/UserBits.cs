@@ -76,7 +76,7 @@ public readonly record struct UserBits(uint Value)
         for (int i = 3; i >= 0; i--)
         {
             char c = (char)((Value >> (i * 8)) & 0xFF);
-            sb.Append(c is >= ' ' and <= '~' || c >= ' ' ? c : '.');
+            sb.Append(c is (>= ' ' and <= '~') or >= '\u00A0' ? c : '.'); // printable ASCII and Latin-1
         }
         return sb.ToString();
     }

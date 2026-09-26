@@ -151,7 +151,8 @@ public readonly struct Timecode : IEquatable<Timecode>, IComparable<Timecode>
 
     /// <summary>
     /// Parses "HH:MM:SS:FF". A ';', ',' or '.' before the frames (e.g. "01:00:00;00") selects drop-frame when the rate has a
-    /// drop-frame variant. Hours, minutes and seconds may be omitted from the left ("10:00" = 00:00:10:00).
+    /// drop-frame variant; the other separators must be ':' or the same character. Hours, minutes and seconds may be
+    /// omitted from the left ("10:00" = 00:00:10:00).
     /// </summary>
     public static Timecode Parse(string text, LtcFrameRate rate = LtcFrameRate.Fps30) =>
         TryParse(text, rate, out var tc, out string? error) ? tc : throw new FormatException(error);
@@ -167,8 +168,15 @@ public readonly struct Timecode : IEquatable<Timecode>, IComparable<Timecode>
         if (string.IsNullOrWhiteSpace(text)) { error = "Empty time code."; return false; }
         string s = text.Trim();
 
-        bool dropSeparator = s.Length >= 3 && (s[^3] is ';' or ',' or '.');
-        if (dropSeparator) rate = rate.WithDropFrame(true);
+        // The separator before the frames selects drop-frame; the others must be ':' or the same character.
+        char last = '\0';
+        foreach (char c in s)
+            if (c is ':' or ';' or ',' or '.')
+            {
+                if (last is not ('\0' or ':') && c != last) { error = $"'{text}' mixes separators; only the one before the frames may be ';', ',' or '.'."; return false; }
+                last = c;
+            }
+        if (last is ';' or ',' or '.') rate = rate.WithDropFrame(true);
 
         string[] parts = s.Split([':', ';', ',', '.'], StringSplitOptions.None);
         if (parts.Length is < 1 or > 4) { error = $"'{text}' is not HH:MM:SS:FF."; return false; }

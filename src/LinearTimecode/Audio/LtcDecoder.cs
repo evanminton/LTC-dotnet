@@ -66,6 +66,7 @@ public sealed class LtcDecoder
     // bit clock
     private double _lastEdge = double.NaN;
     private double _period; // samples per bit cell
+    private double _lastLongInterval; // previous interval longer than 4 bit cells, or 0
     private bool _halfPending;
     private double _halfStart;
 
@@ -118,7 +119,7 @@ public sealed class LtcDecoder
     {
         _envMax = _envMin = 0; _high = false; _haveSample = false; _prevSample = 0;
         _lastRise = _lastFall = double.NaN;
-        _lastEdge = double.NaN; _period = 0; _halfPending = false;
+        _lastEdge = double.NaN; _period = 0; _lastLongInterval = 0; _halfPending = false;
         _reg = UInt128.Zero; _validBits = 0; _bitCount = 0;
         _avgCodewordRate = 0; _maxFrameSeen = -1; _last = null; DetectedRate = null;
         SamplePosition = 0;
@@ -184,8 +185,8 @@ public sealed class LtcDecoder
         _lastEdge = t;
         if (d <= 0) return;
 
-        // Signal gap or first interval: restart the bit clock.
-        if (_period <= 0 || d > 4 * _period)
+        // First interval: seed the bit clock.
+        if (_period <= 0)
         {
             _period = d;
             _halfPending = false;
@@ -193,11 +194,27 @@ public sealed class LtcDecoder
             return;
         }
 
+        // Signal gap: drop the partial codeword but keep the bit clock, so the decoder relocks at once when the code
+        // resumes at the same rate. Only consecutive long intervals of similar length (a genuine drop in bit rate, not
+        // a gap followed by a stray edge) re-seed it.
+        if (d > 4 * _period)
+        {
+            double ratio = _lastLongInterval > 0 ? d / _lastLongInterval : 0;
+            if (ratio is > 0.4 and < 2.5) { _period = d; _lastLongInterval = 0; }
+            else _lastLongInterval = d;
+            _halfPending = false;
+            _validBits = 0;
+            _maxFrameSeen = -1; // the source may have changed
+            return;
+        }
+        _lastLongInterval = 0;
+
         if (d > 1.6 * _period)
         {
-            // The tracked period was a half-cell; this is a full cell.
+            // The tracked period was a half-cell, so the bits collected so far were misread; this is a full cell.
             _period = d;
             _halfPending = false;
+            _validBits = 0;
             EmitBit(false, t - d, t, output);
             return;
         }

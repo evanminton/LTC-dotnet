@@ -37,6 +37,12 @@ public sealed record LtcFrame
     /// </summary>
     public int UnassignedFlagBits { get; init; }
 
+    /// <summary>
+    /// Set by <see cref="FromCodeword"/> when the drop-frame flag was set at a rate without drop-frame counting (30/60
+    /// frames). It is written back by <see cref="ToCodeword"/> so the codeword round-trips, and reported by <see cref="Validate"/>.
+    /// </summary>
+    public bool StrayDropFrameFlag { get; init; }
+
     /// <summary>Set by <see cref="FromCodeword"/> when a received BCD units digit was above 9.</summary>
     public bool BcdError { get; init; }
 
@@ -59,7 +65,7 @@ public sealed record LtcFrame
 
         for (int g = 1; g <= 8; g++) cw = cw.WithBits(LtcBits.BinaryGroup(g), 4, this.UserBits[g]);
 
-        if (LtcBits.DropFrameFlag(b) is var df and >= 0) cw = cw.WithBit(df, tc.Rate.IsDropFrame());
+        if (LtcBits.DropFrameFlag(b) is var df and >= 0) cw = cw.WithBit(df, tc.Rate.IsDropFrame() || StrayDropFrameFlag);
         if (LtcBits.ColorFrameFlag(b) is var cf and >= 0) cw = cw.WithBit(cf, ColorFrame);
         cw = cw.WithBit(LtcBits.Bgf0(b), this.BinaryGroupFlags.Bgf0())
                .WithBit(LtcBits.Bgf1(b), this.BinaryGroupFlags.Bgf1())
@@ -79,7 +85,13 @@ public sealed record LtcFrame
     public static LtcFrame FromCodeword(LtcCodeword codeword, LtcFrameRate rate)
     {
         var b = rate.Base();
-        if (b == TimecodeBase.Base30) rate = rate.WithDropFrame(codeword.DropFrameFlag(b));
+        bool strayDf = false;
+        if (b == TimecodeBase.Base30)
+        {
+            bool df = codeword.DropFrameFlag(b);
+            rate = rate.WithDropFrame(df);
+            strayDf = df && !rate.IsDropFrame();
+        }
         int unassigned = 0;
         if (b != TimecodeBase.Base30 && codeword[10]) unassigned |= 1;
         if (b == TimecodeBase.Base24 && codeword[11]) unassigned |= 2;
@@ -90,6 +102,7 @@ public sealed record LtcFrame
             ColorFrame = codeword.ColorFrameFlag(b),
             PolarityCorrection = codeword.HasEvenZeroCount,
             UnassignedFlagBits = unassigned,
+            StrayDropFrameFlag = strayDf,
             BcdError = !codeword.HasValidBcd,
         };
     }
@@ -114,6 +127,7 @@ public sealed record LtcFrame
         }
         if (this.BinaryGroupFlags.CarriesPageLine() && PageLineFrame.FromUserBits(this.UserBits) is { Index.Category: DirectoryCategory.Control, HasValidChecksum: false })
             issues.Add("ST 262 control frame checksum error.");
+        if (StrayDropFrameFlag) issues.Add($"The drop-frame flag is set, but {Rate.DisplayName()} has no drop-frame counting (§8.3.1).");
         if (UnassignedFlagBits != 0) issues.Add("Unassigned flag bits are set; original sources shall set them to 0 (§9.2.2).");
         return issues;
     }

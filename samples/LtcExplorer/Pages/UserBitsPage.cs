@@ -59,6 +59,7 @@ public class UserBitsPage : ContentPage
     private UserBits _bits;
     private BinaryGroupFlags _flags;
     private IReadOnlyList<PageLineFrame>? _messageFrames;
+    private string? _error; // set while the inputs don't produce valid user bits
 
     public UserBitsPage()
     {
@@ -142,6 +143,7 @@ public class UserBitsPage : ContentPage
     private void Update()
     {
         _messageFrames = null;
+        _error = null;
         bool clock = _clock.IsToggled;
         try
         {
@@ -193,6 +195,7 @@ public class UserBitsPage : ContentPage
         }
         catch (Exception ex) when (ex is FormatException or ArgumentException or OverflowException)
         {
+            _error = ex.Message;
             _status.Text = ex.Message;
         }
     }
@@ -207,6 +210,11 @@ public class UserBitsPage : ContentPage
 
     private void UseInGenerator()
     {
+        if (_error is not null)
+        {
+            _status.Text = $"Nothing sent — fix this first: {_error}";
+            return;
+        }
         AppState.PendingUserBits = (_bits, _flags, _messageFrames);
         AppState.PendingAuxiliary = _mode.SelectedIndex == 5 && _auxRun.IsToggled
             ? AuxiliaryTimeAddress.FromUserBits(_bits, Ui.SelectedRate(_auxRate) ?? LtcFrameRate.Fps25)

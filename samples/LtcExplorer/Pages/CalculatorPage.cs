@@ -72,7 +72,7 @@ public class CalculatorPage : ContentPage
         }
 
         sb.AppendLine();
-        sb.AppendLine(inv, $"Codeword        {rate.CodewordDuration().TotalMilliseconds:0.####} ms   bit {rate.BitPeriod().TotalMicroseconds:0.##} µs   {rate.BitRate():0.###} bit/s");
+        sb.AppendLine(inv, $"Codeword        {rate.CodewordDuration().TotalMilliseconds:0.####} ms   bit {rate.BitPeriodMicroseconds():0.##} µs   {rate.BitRate():0.###} bit/s");
         _out.Text = sb.ToString();
     }
 }

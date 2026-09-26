@@ -34,10 +34,19 @@ public sealed record AuxiliaryTimeAddress
     /// <summary>Color frame flag (§3.3): color frame identification has been applied to the auxiliary address.</summary>
     public bool ColorFrame { get; init; }
 
-    /// <summary>Drop frame flag (§3.2).</summary>
-    public bool DropFrame => Timecode.Rate.IsDropFrame();
+    /// <summary>Drop frame flag (§3.2): set by a drop-frame rate, or as received (<see cref="StrayDropFrameFlag"/>).</summary>
+    public bool DropFrame => Timecode.Rate.IsDropFrame() || StrayDropFrameFlag;
 
-    /// <summary>Unassigned bits as received (bit 0 = BG 4 bit 3, bit 1 = BG 6 bit 3, bits 2–3 = BG 8 bits 2–3); should be 0.</summary>
+    /// <summary>
+    /// Set when decoding found the drop frame flag set at a rate without drop-frame counting (24/25/30 frames). It is
+    /// written back by <see cref="ToUserBits"/> so the bits round-trip, and reported by <see cref="Validate"/>.
+    /// </summary>
+    public bool StrayDropFrameFlag { get; init; }
+
+    /// <summary>
+    /// Unassigned bits as received (bit 0 = BG 4 bit 3, bit 1 = BG 6 bit 3); should be 0. BG 8 bits 2–3 are not
+    /// included: setting them would make the directory page 4 or more, which is not an auxiliary time address.
+    /// </summary>
     public int UnassignedBits { get; init; }
 
     /// <summary>The ST 262 directory index this address lives at (page = hours tens, line = hours units).</summary>
@@ -53,7 +62,7 @@ public sealed record AuxiliaryTimeAddress
             tc.Frames % 10, bg2,
             tc.Seconds % 10, tc.Seconds / 10 | ((UnassignedBits & 1) << 3),
             tc.Minutes % 10, tc.Minutes / 10 | ((UnassignedBits & 2) << 2),
-            tc.Hours % 10, tc.Hours / 10 | ((UnassignedBits >> 2 & 3) << 2),
+            tc.Hours % 10, tc.Hours / 10,
         ]);
     }
 
@@ -87,11 +96,11 @@ public sealed record AuxiliaryTimeAddress
         }
 
         bool df = (bits[2] & 4) != 0, cf = (bits[2] & 8) != 0;
-        int unassigned = ((bits[4] >> 3) & 1) | (((bits[6] >> 3) & 1) << 1) | (((bits[8] >> 2) & 3) << 2);
-        var r = df ? rate.WithDropFrame(true) : rate.IsDropFrame() ? rate.WithDropFrame(false) : rate;
+        int unassigned = ((bits[4] >> 3) & 1) | (((bits[6] >> 3) & 1) << 1);
+        var r = rate.WithDropFrame(df);
         var tc = Timecode.CreateUnchecked(page * 10 + line, (bits[6] & 7) * 10 + bits[5], (bits[4] & 7) * 10 + bits[3], (bits[2] & 3) * 10 + bits[1], r);
         if (tc.Validate() is { } e) { error = $"Auxiliary time address: {e}"; return false; }
-        value = new AuxiliaryTimeAddress(tc, cf) { UnassignedBits = unassigned };
+        value = new AuxiliaryTimeAddress(tc, cf) { UnassignedBits = unassigned, StrayDropFrameFlag = df && !r.IsDropFrame() };
         return true;
     }
 
@@ -103,8 +112,9 @@ public sealed record AuxiliaryTimeAddress
     {
         var issues = new List<string>();
         if (Timecode.Validate() is { } e) issues.Add(e);
-        if (UnassignedBits != 0) issues.Add("RP 169 unassigned bits are set; they shall be 0 (§3.4).");
-        if (DropFrame && Timecode.Rate.Base() != TimecodeBase.Base30) issues.Add("Drop frame flag is set at a rate without drop-frame counting.");
+        if ((UnassignedBits & ~3) != 0) issues.Add("Only unassigned bits 0–1 (BG 4 bit 3, BG 6 bit 3) exist; the others are ignored.");
+        if ((UnassignedBits & 3) != 0) issues.Add("RP 169 unassigned bits are set; they shall be 0 (§3.4).");
+        if (StrayDropFrameFlag) issues.Add($"Drop frame flag is set, but {Timecode.Rate.DisplayName()} has no drop-frame counting.");
         return issues;
     }
 

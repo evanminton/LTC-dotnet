@@ -36,7 +36,8 @@ public static class BinaryGroupExtensions
 
     /// <summary>
     /// ST 309 §5.4: moves the date carried by <paramref name="frame"/> by <paramref name="days"/>. Frames without a
-    /// valid ST 309 date are returned unchanged.
+    /// valid ST 309 date, or whose date would leave the range of its format (YYMMDD century, 6-digit MJD), are
+    /// returned unchanged.
     /// </summary>
     public static LtcFrame RollDate(this LtcFrame frame, int days)
     {

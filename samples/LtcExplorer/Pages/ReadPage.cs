@@ -27,6 +27,7 @@ public class ReadPage : ContentPage
     private readonly Label _frames = Ui.MonoLabel(12);
     private readonly Label _status = Ui.Caption("Pick a WAV file containing LTC.");
     private string? _path;
+    private int _decodeId; // only the latest decode updates the page
 
     public ReadPage()
     {
@@ -92,6 +93,7 @@ public class ReadPage : ContentPage
     {
         if (_path is null) { _status.Text = "Pick a file first."; return; }
         string path = _path;
+        int id = ++_decodeId;
         _status.Text = $"Decoding {Path.GetFileName(path)}…";
         LtcFrameRate? rate = Ui.SelectedRate(_rate, withAuto: true);
         int channel = int.TryParse(_channel.Text, out int c) ? c : 1;
@@ -108,13 +110,14 @@ public class ReadPage : ContentPage
                 var frames = decoder.Process(wav.Channels[channel - 1]);
                 return (Summarize(path, wav, decoder, frames, rate is null), all ? List(frames, wav.SampleRate) : "");
             });
+            if (id != _decodeId) return; // a newer decode has started
             _summary.Text = summary;
             _frames.Text = list;
             _status.Text = $"Decoded {Path.GetFileName(path)}.";
         }
         catch (Exception ex)
         {
-            _status.Text = ex.Message;
+            if (id == _decodeId) _status.Text = ex.Message;
         }
     }
 
@@ -152,10 +155,10 @@ public class ReadPage : ContentPage
     private static string List(IReadOnlyList<LtcDecodedFrame> frames, int sampleRate)
     {
         var sb = new StringBuilder();
-        foreach (var f in frames.Take(5000))
+        foreach (var (i, f) in frames.Take(5000).Index())
         {
             sb.AppendLine(CultureInfo.InvariantCulture,
-                $"{f.StartSample / sampleRate,9:0.000}s  {f.Timecode}  {(f.Direction == LtcDirection.Reverse ? "REV" : "FWD")} x{Math.Abs(f.Speed):0.000}  {f.Frame.UserBits.ToDisplayString()}  {f.Frame.BinaryGroupFlags.BitPattern()}{(f.Frame.ColorFrame ? " CF" : "")}  {UserBitsDescriber.Summary(f.Frame.UserBits, f.Frame.BinaryGroupFlags, f.Frame.Rate)}{(f.IsContinuous ? "" : "  ← jump")}");
+                $"{f.StartSample / sampleRate,9:0.000}s  {f.Timecode}  {(f.Direction == LtcDirection.Reverse ? "REV" : "FWD")} x{Math.Abs(f.Speed):0.000}  {f.Frame.UserBits.ToDisplayString()}  {f.Frame.BinaryGroupFlags.BitPattern()}{(f.Frame.ColorFrame ? " CF" : "")}  {UserBitsDescriber.Summary(f.Frame.UserBits, f.Frame.BinaryGroupFlags, f.Frame.Rate)}{(f.IsContinuous || i == 0 ? "" : "  ← jump")}");
         }
         if (frames.Count > 5000) sb.AppendLine($"… {frames.Count - 5000} more");
         return sb.ToString();

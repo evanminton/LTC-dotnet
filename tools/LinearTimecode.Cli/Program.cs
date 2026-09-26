@@ -98,7 +98,7 @@ internal static class Program
                 _ => Fail($"Unknown command '{args[0]}'. Run 'ltc help'."),
             };
         }
-        catch (Exception ex) when (ex is FormatException or ArgumentException or IOException or InvalidDataException or NotSupportedException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is FormatException or ArgumentException or IOException or InvalidDataException or NotSupportedException or UnauthorizedAccessException or OverflowException or InvalidOperationException)
         {
             return Fail(ex.Message);
         }
@@ -127,7 +127,7 @@ internal static class Program
         foreach (var r in LtcFrameRateExtensions.All)
         {
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"{r.Token(),-9} {r.DisplayName(),-10} {r.VideoFrameRate(),-14:0.#########} {r.CodewordRate(),-13:0.######} {r.BitRate(),-11:0.###} {r.BitPeriod().TotalMicroseconds,-8:0.0} µs  {r.AddressesPerDay(),-10} {r.Description()}"));
+                $"{r.Token(),-9} {r.DisplayName(),-10} {r.VideoFrameRate(),-14:0.#########} {r.CodewordRate(),-13:0.######} {r.BitRate(),-11:0.###} {r.BitPeriodMicroseconds(),-8:0.0} µs  {r.AddressesPerDay(),-10} {r.Description()}"));
         }
         return 0;
     }
@@ -146,7 +146,8 @@ internal static class Program
     {
         string input = string.Join(' ', a.Positional);
         if (input.Length == 0) return Fail("explain needs a time code, hex bytes or a bit string.");
-        Console.Write(LtcDescriber.Explain(input, a.Rate()));
+        if (!LtcDescriber.TryExplain(input, a.Rate(), out string? text, out string? error)) return Fail(error);
+        Console.Write(text);
         return 0;
     }
 
@@ -173,23 +174,48 @@ internal static class Program
     {
         string path = a.PositionalAt(0, "output .wav path");
         var rate = a.Rate();
-        string startText = a.Value("start") ?? "00:00:00:00";
-        var frame = a.Flag("now")
-            ? BuildFrame(a, null, Timecode.FromTimeOfDay(DateTime.Now.TimeOfDay, rate))
-            : BuildFrame(a, startText);
+        if (a.Flag("now") && a.Value("start") is not null) return Fail("Use either --start or --now, not both.");
+        if (a.Value("seconds") is not null && a.Value("frames") is not null) return Fail("Use either --frames or --seconds, not both.");
+        if (a.Value("message") is not null && a.Value("aux-start") is not null) return Fail("Use either --message or --aux-start, not both.");
+        if ((a.Value("message") ?? a.Value("aux-start")) is not null && ContentOptions.Any(o => a.Value(o) is not null))
+            return Fail("--message and --aux-start write the user bits of every frame; don't combine them with --ub, --text, --date or --pageline.");
+
+        LtcFrame frame;
+        if (a.Flag("now"))
+        {
+            // ST 309: with an MJD date the time address is UTC; with YYMMDD it is local time at the date's time zone.
+            frame = BuildFrame(a, null, Timecode.Zero(rate));
+            var now = DateTimeOffset.UtcNow;
+            var time = frame.GetDateTimeZone() switch
+            {
+                { TimeAddressIsUtc: true } => now.UtcDateTime.TimeOfDay,
+                { TimeZone.Offset: { } offset } => now.ToOffset(offset).TimeOfDay,
+                _ => now.ToLocalTime().TimeOfDay,
+            };
+            frame = frame with { Timecode = Timecode.FromTimeOfDay(time, rate) };
+        }
+        else
+        {
+            frame = BuildFrame(a, a.Value("start") ?? "00:00:00:00");
+        }
         rate = frame.Rate;
 
         int sr = a.Int("sr", 48_000);
-        int frames = a.Value("seconds") is { } secs
-            ? (int)Math.Ceiling(double.Parse(secs, CultureInfo.InvariantCulture) * rate.CodewordRate())
+        double frameCount = a.Value("seconds") is not null
+            ? Math.Ceiling(a.Double("seconds", 0) * rate.CodewordRate())
             : a.Int("frames", (int)Math.Ceiling(10 * rate.CodewordRate()));
-        if (frames <= 0) return Fail("Nothing to generate.");
+        if (double.IsNaN(frameCount) || frameCount <= 0) return Fail("Nothing to generate.");
+        if (frameCount > int.MaxValue) return Fail("Output too long for a WAV file.");
+        int frames = (int)frameCount;
 
         double speed = a.Double("speed", 1.0);
+        double level = a.Double("level", -6), rise = a.Double("rise", 40);
+        if (level > 0) return Fail("--level is a peak level in dBFS and must be 0 or below.");
+        if (rise < 0) return Fail("--rise must be 0 (square edges) or more.");
         var gen = new LtcGenerator(frame, sr)
         {
-            Amplitude = (float)Math.Pow(10, a.Double("level", -6) / 20),
-            RiseTime = TimeSpan.FromTicks((long)Math.Round(a.Double("rise", 40) * 10)),
+            Amplitude = (float)Math.Pow(10, level / 20),
+            RiseTime = TimeSpan.FromTicks((long)Math.Round(rise * 10)),
             Invert = a.Flag("invert"),
             Reverse = a.Flag("reverse"),
             Speed = speed,
@@ -197,7 +223,7 @@ internal static class Program
         if (a.Value("message") is { } messageText)
         {
             var layout = Layout(a);
-            var msgFrames = layout.EncodeText(messageText, (byte)a.Int("id", 0));
+            var msgFrames = layout.EncodeText(messageText, a.Byte("id", 0));
             bool clock = a.Flag("clock");
             gen.FrameHook = (i, f) => f.WithPageLine(msgFrames[(int)(i % msgFrames.Count)], clock);
             Console.WriteLine($"ST 262 message string: {msgFrames.Count} frames repeating ({layout.Prefix} prefix, {layout.Message} message, {layout.Suffix} suffix).");
@@ -210,13 +236,20 @@ internal static class Program
         }
         var format = ParseFormat(a.Value("format") ?? "pcm16");
         long samples = (long)Math.Ceiling(LtcGenerator.SamplesFor(frames, rate, sr) / speed);
-        if (samples > int.MaxValue) return Fail("Output too long for a single WAV buffer.");
-        float[] audio = gen.Read((int)samples);
-        WavFile.Write(path, audio, sr, format);
+        try
+        {
+            using var fs = File.Create(path);
+            WavFile.Write(fs, sr, samples, gen.Read, format);
+        }
+        catch (Exception ex) when (ex is not IOException and not UnauthorizedAccessException)
+        {
+            File.Delete(path); // don't leave a truncated file behind
+            throw;
+        }
 
         var last = gen.Reverse ? frame.Timecode.AddFrames(-(frames - 1)) : frame.Timecode.AddFrames(frames - 1);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"Wrote {path}: {frames} codewords {frame.Timecode} → {last} at {rate.DisplayName()}, {sr} Hz {format}, {TimeSpan.FromSeconds((double)samples / sr):mm\\:ss\\.fff}, peak {20 * Math.Log10(gen.Amplitude):0.#} dBFS{(gen.Reverse ? ", reverse" : "")}{(speed != 1 ? $", x{speed}" : "")}."));
+            $"Wrote {path}: {frames} codewords {frame.Timecode} → {last} at {rate.DisplayName()}, {sr} Hz {format}, {TimeSpan.FromSeconds((double)samples / sr):hh\\:mm\\:ss\\.fff}, peak {20 * Math.Log10(gen.Amplitude):0.#} dBFS{(gen.Reverse ? ", reverse" : "")}{(speed != 1 ? $", x{speed}" : "")}."));
         foreach (var issue in frame.Validate()) Console.WriteLine($"note: {issue}");
         return 0;
     }
@@ -234,8 +267,10 @@ internal static class Program
 
         Console.Error.WriteLine($"{path}: {wav.SampleRate} Hz, {wav.SourceBitsPerSample}-bit, {wav.ChannelCount} ch, {wav.Duration:hh\\:mm\\:ss\\.fff}, channel {channel}");
         if (frames.Count == 0) { Console.Error.WriteLine("No LTC found."); return 2; }
+        var first = frames[0];
 
         bool csv = a.Flag("csv");
+        if (csv && a.Flag("summary")) return Fail("Use either --csv or --summary, not both.");
         if (csv) Console.WriteLine("timecode,rate,start_sample,start_seconds,direction,speed,userbits,bgf,color_frame,continuous,hex,meaning");
         if (!a.Flag("summary"))
         {
@@ -246,11 +281,10 @@ internal static class Program
                         $"{f.Timecode},{f.Frame.Rate.Token()},{f.StartSample:0.00},{f.StartSample / wav.SampleRate:0.000000},{f.Direction},{f.Speed:0.0000},{f.Frame.UserBits},{f.Frame.BinaryGroupFlags.BitPattern()},{(f.Frame.ColorFrame ? 1 : 0)},{(f.IsContinuous ? 1 : 0)},{f.Codeword.ToHex()},\"{UserBitsDescriber.Summary(f.Frame.UserBits, f.Frame.BinaryGroupFlags, f.Frame.Rate).Replace("\"", "\"\"")}\""));
                 else
                     Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                        $"{f.StartSample / wav.SampleRate,10:0.000}s  {f.Timecode}  {(f.Direction == LtcDirection.Reverse ? "REV" : "FWD")} x{Math.Abs(f.Speed):0.000}  UB {f.Frame.UserBits.ToDisplayString()}  BGF {f.Frame.BinaryGroupFlags.BitPattern()}{(f.Frame.ColorFrame ? "  CF" : "")}{(f.Frame.BinaryGroupFlags.CarriesDateTimeZone() || f.Frame.BinaryGroupFlags.CarriesPageLine() ? "  " + UserBitsDescriber.Summary(f.Frame.UserBits, f.Frame.BinaryGroupFlags, f.Frame.Rate) : "")}{(f.IsContinuous ? "" : "  ← jump")}{(f.Issues.Count > 0 ? "  ! " + string.Join("; ", f.Issues) : "")}"));
+                        $"{f.StartSample / wav.SampleRate,10:0.000}s  {f.Timecode}  {(f.Direction == LtcDirection.Reverse ? "REV" : "FWD")} x{Math.Abs(f.Speed):0.000}  UB {f.Frame.UserBits.ToDisplayString()}  BGF {f.Frame.BinaryGroupFlags.BitPattern()}{(f.Frame.ColorFrame ? "  CF" : "")}{(f.Frame.BinaryGroupFlags.CarriesDateTimeZone() || f.Frame.BinaryGroupFlags.CarriesPageLine() ? "  " + UserBitsDescriber.Summary(f.Frame.UserBits, f.Frame.BinaryGroupFlags, f.Frame.Rate) : "")}{(f.IsContinuous || f == first ? "" : "  ← jump")}{(f.Issues.Count > 0 ? "  ! " + string.Join("; ", f.Issues) : "")}"));
             }
         }
 
-        var first = frames[0];
         var lastFrame = frames[^1];
         int jumps = frames.Skip(1).Count(f => !f.IsContinuous);
         Console.Error.WriteLine();
@@ -290,7 +324,8 @@ internal static class Program
     private static int Add(Args a)
     {
         var tc = a.Tc(a.PositionalAt(0, "time code"));
-        long n = long.Parse(a.PositionalAt(1, "frame count"), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+        string count = a.PositionalAt(1, "frame count");
+        if (!long.TryParse(count, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out long n)) return Fail($"'{count}' is not a whole number of frames.");
         Console.WriteLine(tc.AddFrames(n));
         return 0;
     }
@@ -298,9 +333,18 @@ internal static class Program
     private static int Diff(Args a)
     {
         var t1 = a.Tc(a.PositionalAt(0, "first time code"));
-        var t2 = a.Tc(a.PositionalAt(1, "second time code")).WithRate(t1.Rate);
+        var t2 = a.Tc(a.PositionalAt(1, "second time code"));
+        string seconds = (t2.ToTimeSpan() - t1.ToTimeSpan()).TotalSeconds.ToString("0.######", CultureInfo.InvariantCulture);
+        if (t2.Rate != t1.Rate)
+        {
+            // Different counting (e.g. one DF, one NDF): compare real time, and count addresses after converting.
+            var t2At1 = t2.ConvertTo(t1.Rate);
+            int dc = t2At1.TotalFrames - t1.TotalFrames;
+            Console.WriteLine($"{seconds} s real time; {t2} @ {t2.Rate.DisplayName()} ≈ {t2At1} @ {t1.Rate.DisplayName()}, {dc} addresses at {t1.Rate.DisplayName()}");
+            return 0;
+        }
         int d = t2.TotalFrames - t1.TotalFrames;
-        Console.WriteLine($"{d} addresses ({Timecode.FromTotalFrames(Math.Abs(d), t1.Rate)}), {(t2.ToTimeSpan() - t1.ToTimeSpan()).TotalSeconds.ToString("0.######", CultureInfo.InvariantCulture)} s real time");
+        Console.WriteLine($"{d} addresses ({Timecode.FromTotalFrames(Math.Abs(d), t1.Rate)}), {seconds} s real time");
         return 0;
     }
 
@@ -350,7 +394,8 @@ internal static class Program
         else if (a.Value("control") is { } line)
         {
             byte c1 = ParseByte(a.PositionalAt(0, "command byte 1")), c2 = ParseByte(a.PositionalAt(1, "command byte 2"));
-            f = PageLineFrame.ControlCode(int.Parse(line, CultureInfo.InvariantCulture), c1, c2);
+            if (!int.TryParse(line, NumberStyles.None, CultureInfo.InvariantCulture, out int controlLine)) return Fail($"--control expects a line number 0–15, not '{line}'.");
+            f = PageLineFrame.ControlCode(controlLine, c1, c2);
         }
         else
         {
@@ -371,7 +416,7 @@ internal static class Program
         string text = string.Join(' ', a.Positional);
         if (text.Length == 0) return Fail("message needs some text.");
         var layout = Layout(a);
-        var frames = layout.EncodeText(text, (byte)a.Int("id", 0));
+        var frames = layout.EncodeText(text, a.Byte("id", 0));
         Console.WriteLine($"ST 262 message string, {frames.Count} frames (prefix {layout.Prefix}, message {layout.Message}, suffix {layout.Suffix}); BGF 101:");
         for (int i = 0; i < frames.Count; i++)
         {
@@ -388,9 +433,12 @@ internal static class Program
     {
         var format = a.Flag("mjd") ? DateFormat.ModifiedJulianDate : DateFormat.Yymmdd;
         var tz = a.Value("tz") is { } t ? TimeZoneCode.Parse(t) : TimeZoneCode.FromOffset(DateTimeOffset.Now.Offset) ?? TimeZoneCode.Utc;
+        var now = DateTimeOffset.UtcNow;
         DateOnly date = dateText.ToLowerInvariant() switch
         {
-            "today" or "now" => format == DateFormat.ModifiedJulianDate ? DateOnly.FromDateTime(DateTime.UtcNow) : DateOnly.FromDateTime(DateTime.Now),
+            // MJD carries the UTC date; YYMMDD the local date at the chosen time zone.
+            "today" or "now" => DateOnly.FromDateTime(format == DateFormat.ModifiedJulianDate ? now.UtcDateTime
+                : tz.Offset is { } offset ? now.ToOffset(offset).DateTime : now.ToLocalTime().DateTime),
             _ => DateOnly.Parse(dateText, CultureInfo.InvariantCulture),
         };
         return new DateTimeZone(date, tz, format, a.Flag("dst"));
@@ -400,6 +448,7 @@ internal static class Program
     {
         var bytes = (bytesText ?? "").Split([' ', ',', ':'], StringSplitOptions.RemoveEmptyEntries).Select(ParseByte).ToArray();
         if (bytes.Length > 3) throw new ArgumentException("A page/line frame holds three data bytes (byte 4 is the directory index).");
+        if (checksum && bytes.Length > 2) throw new ArgumentException("With --checksum, byte 1 holds the checksum; give at most two data bytes (B2 B3).");
         byte B(int i) => i < bytes.Length ? bytes[i] : (byte)0;
         return PageLineFrame.SingleFrame(index, B(0), B(1), B(2), checksum);
     }
@@ -426,6 +475,8 @@ internal static class Program
             ColorFrame = a.Flag("cf"),
             PolarityCorrection = !a.Flag("no-polarity"),
         };
+        if (ContentOptions.Count(o => a.Value(o) is not null) > 1)
+            throw new ArgumentException("Use only one of --ub, --text, --date and --pageline; each sets all 32 user bits.");
         if (a.Value("text") is { } text)
             frame = frame with { UserBits = UserBits.FromText(text), BinaryGroupFlags = BinaryGroupFlags.EightBitCharacters };
         if (a.Value("ub") is { } ub) frame = frame with { UserBits = UserBits.Parse(ub) };
@@ -440,10 +491,15 @@ internal static class Program
     {
         s = s.Trim();
         if (s.Length == 3 && s.All(c => c is '0' or '1')) return (BinaryGroupFlags)System.Convert.ToInt32(s, 2);
-        if (int.TryParse(s, out int v) && v is >= 0 and <= 7) return (BinaryGroupFlags)v;
-        if (Enum.TryParse<BinaryGroupFlags>(s, true, out var f)) return f;
+        if (int.TryParse(s, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int v))
+        {
+            if (v is >= 0 and <= 7) return (BinaryGroupFlags)v;
+        }
+        else if (Enum.TryParse<BinaryGroupFlags>(s, true, out var f) && Enum.IsDefined(f)) return f;
         throw new FormatException($"--bgf expects 0–7, a 3-bit pattern like 110, or one of {string.Join(", ", Enum.GetNames<BinaryGroupFlags>())}.");
     }
+
+    private static readonly string[] ContentOptions = ["ub", "text", "date", "pageline"];
 
     private static WavSampleFormat ParseFormat(string s) => s.ToLowerInvariant() switch
     {
@@ -469,7 +525,8 @@ internal static class Program
                     string name = s[2..];
                     int eq = name.IndexOf('=');
                     if (eq > 0) _named[name[..eq]] = name[(eq + 1)..];
-                    else if (Switches.Contains(name.ToLowerInvariant()) || i + 1 >= args.Length) _named[name] = null;
+                    else if (Switches.Contains(name.ToLowerInvariant())) _named[name] = null;
+                    else if (i + 1 >= args.Length || args[i + 1].StartsWith("--", StringComparison.Ordinal)) throw new ArgumentException($"--{name} needs a value.");
                     else _named[name] = args[++i];
                 }
                 else Positional.Add(s);
@@ -482,9 +539,18 @@ internal static class Program
 
         public string? Value(string name) => _named.TryGetValue(name, out var v) ? v : null;
 
-        public int Int(string name, int fallback) => Value(name) is { } v ? int.Parse(v, CultureInfo.InvariantCulture) : fallback;
+        public int Int(string name, int fallback) =>
+            Value(name) is not { } v ? fallback
+            : int.TryParse(v, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int n) ? n
+            : throw new FormatException($"--{name} expects a whole number, not '{v}'.");
 
-        public double Double(string name, double fallback) => Value(name) is { } v ? double.Parse(v, CultureInfo.InvariantCulture) : fallback;
+        public byte Byte(string name, byte fallback) =>
+            Int(name, fallback) is var n and >= 0 and <= 255 ? (byte)n : throw new FormatException($"--{name} expects 0–255.");
+
+        public double Double(string name, double fallback) =>
+            Value(name) is not { } v ? fallback
+            : double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out double d) && double.IsFinite(d) ? d
+            : throw new FormatException($"--{name} expects a number, not '{v}'.");
 
         public LtcFrameRate Rate() => Value("rate") is { } r ? LtcFrameRateExtensions.Parse(r) : LtcFrameRate.Fps30;
 

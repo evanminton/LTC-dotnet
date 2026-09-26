@@ -32,6 +32,7 @@ public class GeneratePage : ContentPage
     private readonly Label _status = Ui.Caption("");
     private readonly Label _message = Ui.Caption("");
     private readonly Button _clearMessage;
+    private readonly Button _generate;
     private IReadOnlyList<PageLineFrame>? _messageFrames;
     private AuxiliaryTimeAddress? _runningAux;
     private readonly WaveformDrawable _wave = new();
@@ -42,6 +43,7 @@ public class GeneratePage : ContentPage
         Title = "Generate";
         _waveView = new GraphicsView { Drawable = _wave, HeightRequest = 180 };
         _clearMessage = Ui.Button("Stop per-frame user bits", (_, _) => { _messageFrames = null; _runningAux = null; Preview(); });
+        _generate = Ui.Button("Generate WAV", async (_, _) => await GenerateAsync());
 
         _level.ValueChanged += (_, _) => { UpdateLevelText(); Preview(); };
         _text.TextChanged += (_, e) =>
@@ -87,7 +89,7 @@ public class GeneratePage : ContentPage
             Ui.Heading("First codeword"),
             Ui.Panel(_waveView),
             _summary,
-            new HorizontalStackLayout { Children = { Ui.Button("Generate WAV", async (_, _) => await GenerateAsync()) } },
+            new HorizontalStackLayout { Children = { _generate } },
             _status);
 
         Preview();
@@ -115,27 +117,39 @@ public class GeneratePage : ContentPage
     {
         error = null;
         var rate = Ui.SelectedRate(_rate) ?? LtcFrameRate.Fps25;
-        Timecode tc;
-        if (_now.IsToggled) tc = Timecode.FromTimeOfDay(DateTime.Now.TimeOfDay, rate);
-        else if (!Timecode.TryParse(_start.Text, rate, out tc, out error)) tc = Timecode.Zero(rate);
+        Timecode tc = Timecode.Zero(rate);
+        if (!_now.IsToggled && !Timecode.TryParse(_start.Text, rate, out tc, out error)) tc = Timecode.Zero(rate);
 
         var ub = UserBits.Empty;
         try { ub = UserBits.Parse(string.IsNullOrWhiteSpace(_userBits.Text) ? "0" : _userBits.Text); }
         catch (FormatException ex) { error ??= ex.Message; }
 
-        return new LtcFrame(tc)
+        var frame = new LtcFrame(tc)
         {
             UserBits = ub,
             BinaryGroupFlags = (BinaryGroupFlags)Math.Max(0, _bgf.SelectedIndex),
             ColorFrame = _colorFrame.IsToggled,
             PolarityCorrection = _polarity.IsToggled,
         };
+        if (_now.IsToggled)
+        {
+            // ST 309: with an MJD date the time address is UTC; with YYMMDD it is local time at the date's time zone.
+            var now = DateTimeOffset.UtcNow;
+            var time = frame.GetDateTimeZone() switch
+            {
+                { TimeAddressIsUtc: true } => now.UtcDateTime.TimeOfDay,
+                { TimeZone.Offset: { } offset } => now.ToOffset(offset).TimeOfDay,
+                _ => now.ToLocalTime().TimeOfDay,
+            };
+            frame = frame with { Timecode = Timecode.FromTimeOfDay(time, rate) };
+        }
+        return frame;
     }
 
     private LtcGenerator BuildGenerator(LtcFrame frame, int sampleRate)
     {
-        double rise = double.TryParse(_rise.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double r) ? Math.Clamp(r, 0, 1000) : 40;
-        double speed = double.TryParse(_speed.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double s) && s > 0 ? Math.Clamp(s, 0.05, 20) : 1;
+        double rise = TryParseNumber(_rise.Text, out double r) ? Math.Clamp(r, 0, 1000) : 40;
+        double speed = TryParseNumber(_speed.Text, out double s) && s > 0 ? Math.Clamp(s, 0.05, 20) : 1;
         var frames = _messageFrames;
         var aux = _runningAux;
         return new LtcGenerator(frame, sampleRate)
@@ -151,6 +165,11 @@ public class GeneratePage : ContentPage
         };
     }
 
+    // Accepts "1.5" and, in comma-decimal locales, "1,5" (the numeric keyboard types the locale's separator).
+    private static bool TryParseNumber(string? text, out double value) =>
+        double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value) ||
+        double.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out value);
+
     private int SampleRate => SampleRates[Math.Max(0, _sampleRate.SelectedIndex)];
 
     private void Preview()
@@ -165,7 +184,7 @@ public class GeneratePage : ContentPage
 
         var rate = frame.Rate;
         _summary.Text = string.Create(CultureInfo.InvariantCulture,
-            $"{frame}\nUser bits  {UserBitsDescriber.Summary(frame.UserBits, frame.BinaryGroupFlags, frame.Rate)}\nHex  {cw.ToHex()}\nRate {rate.DisplayName()} — {rate.Description()}\nBit period {rate.BitPeriod().TotalMicroseconds / gen.Speed:0.0} µs, codeword {rate.CodewordDuration().TotalMilliseconds / gen.Speed:0.###} ms");
+            $"{frame}\nUser bits  {UserBitsDescriber.Summary(frame.UserBits, frame.BinaryGroupFlags, frame.Rate)}\nHex  {cw.ToHex()}\nRate {rate.DisplayName()} — {rate.Description()}\nBit period {rate.BitPeriodMicroseconds() / gen.Speed:0.0} µs, codeword {rate.CodewordDuration().TotalMilliseconds / gen.Speed:0.###} ms");
         _message.Text = _runningAux is { } ra ? $"RP 169 auxiliary time address running from {ra.Timecode}."
             : _messageFrames is { } mf ? $"ST 262 message string: {mf.Count} frames cycling through the user bits." : "";
         _clearMessage.IsVisible = _messageFrames is not null || _runningAux is not null;
@@ -177,7 +196,7 @@ public class GeneratePage : ContentPage
     {
         var frame = BuildFrame(out string? error);
         if (error is not null) { _status.Text = error; return; }
-        if (!double.TryParse(_seconds.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double seconds) || seconds <= 0 || seconds > 3600)
+        if (!TryParseNumber(_seconds.Text, out double seconds) || seconds <= 0 || seconds > 3600)
         {
             _status.Text = "Duration must be between 0 and 3600 seconds.";
             return;
@@ -186,25 +205,38 @@ public class GeneratePage : ContentPage
         int sr = SampleRate;
         var format = (WavSampleFormat)Enum.Parse(typeof(WavSampleFormat), (string)_format.SelectedItem);
         var gen = BuildGenerator(frame, sr);
+        _generate.IsEnabled = false; // one file at a time: two runs would write the same file name
         _status.Text = "Generating…";
-
-        string name = $"LTC_{frame.Timecode.ToString().Replace(':', '-').Replace(';', '-')}_{frame.Rate.Token()}_{sr}.wav";
-        string dir = DeviceInfo.Platform == DevicePlatform.WinUI
-            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "LtcExplorer")
-            : FileSystem.CacheDirectory;
-        Directory.CreateDirectory(dir);
-        string path = Path.Combine(dir, name);
-
-        await Task.Run(() =>
+        try
         {
-            float[] audio = gen.Read((int)Math.Ceiling(seconds * sr));
-            WavFile.Write(path, audio, sr, format);
-        });
+            string name = $"LTC_{frame.Timecode.ToString().Replace(':', '-').Replace(';', '-')}_{frame.Rate.Token()}_{sr}.wav";
+            string dir = DeviceInfo.Platform == DevicePlatform.WinUI
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "LtcExplorer")
+                : FileSystem.CacheDirectory;
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, name);
 
-        AppState.LastGeneratedPath = path;
-        _status.Text = $"Saved {path}";
+            // Streamed to disk in chunks, so an hour at 192 kHz doesn't need gigabytes of memory.
+            long samples = (long)Math.Ceiling(seconds * sr);
+            await Task.Run(() =>
+            {
+                using var fs = File.Create(path);
+                WavFile.Write(fs, sr, samples, gen.Read, format);
+            });
 
-        if (DeviceInfo.Platform != DevicePlatform.WinUI)
-            await Share.Default.RequestAsync(new ShareFileRequest { Title = name, File = new ShareFile(path) });
+            AppState.LastGeneratedPath = path;
+            _status.Text = $"Saved {path}";
+
+            if (DeviceInfo.Platform != DevicePlatform.WinUI)
+                await Share.Default.RequestAsync(new ShareFileRequest { Title = name, File = new ShareFile(path) });
+        }
+        catch (Exception ex)
+        {
+            _status.Text = $"Could not generate the file: {ex.Message}";
+        }
+        finally
+        {
+            _generate.IsEnabled = true;
+        }
     }
 }

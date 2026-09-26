@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
 using LinearTimecode.BinaryGroups;
@@ -9,19 +10,30 @@ public static class LtcDescriber
 {
     /// <summary>
     /// Explains any of: a time code ("01:00:00;00"), 8/10 hex bytes, or a 64/80-digit bit string.
+    /// Returns the reason instead when the input can't be read.
     /// </summary>
-    public static string Explain(string input, LtcFrameRate rate = LtcFrameRate.Fps30)
+    public static string Explain(string input, LtcFrameRate rate = LtcFrameRate.Fps30) =>
+        TryExplain(input, rate, out string? text, out string? error) ? text : error;
+
+    /// <summary>
+    /// Explains any of: a time code ("01:00:00;00"), 8/10 hex bytes, or a 64/80-digit bit string. Returns false with the
+    /// reason when the input is none of these.
+    /// </summary>
+    public static bool TryExplain(string? input, LtcFrameRate rate, [NotNullWhen(true)] out string? text, [NotNullWhen(false)] out string? error)
     {
-        if (string.IsNullOrWhiteSpace(input)) return "Enter a time code, 10 hex bytes or 80 bits.";
+        text = error = null;
+        if (string.IsNullOrWhiteSpace(input)) { error = "Enter a time code, 10 hex bytes or 80 bits."; return false; }
         string s = input.Trim();
-        if (Timecode.TryParse(s, rate, out var tc, out string? tcError)) return Explain(new LtcFrame(tc));
+        if (Timecode.TryParse(s, rate, out var tc, out string? tcError)) { text = Explain(new LtcFrame(tc)); return true; }
         try
         {
-            return Explain(LtcCodeword.Parse(s), rate);
+            text = Explain(LtcCodeword.Parse(s), rate);
+            return true;
         }
         catch (FormatException ex)
         {
-            return s.Contains(':') || s.Contains(';') ? tcError ?? ex.Message : ex.Message;
+            error = s.Contains(':') || s.Contains(';') ? tcError ?? ex.Message : ex.Message;
+            return false;
         }
     }
 
@@ -67,7 +79,7 @@ public static class LtcDescriber
         sb.AppendLine();
         sb.AppendLine($"Sync word      bits 64–79 = 0011111111111101");
         sb.AppendLine();
-        sb.AppendLine(inv, $"Timing         codeword {rate.CodewordDuration().TotalMilliseconds:0.###} ms, bit {rate.BitPeriod().TotalMicroseconds:0.#} µs, half-bit {rate.BitPeriod().TotalMicroseconds / 2:0.#} µs");
+        sb.AppendLine(inv, $"Timing         codeword {rate.CodewordDuration().TotalMilliseconds:0.###} ms, bit {rate.BitPeriodMicroseconds():0.#} µs, half-bit {rate.BitPeriodMicroseconds() / 2:0.#} µs");
         if (frame.Timecode.IsValid)
             sb.AppendLine(inv, $"Elapsed        {frame.Timecode.ToTimeSpan():hh\\:mm\\:ss\\.fff} real time since 00:00:00:00 (address #{frame.Timecode.TotalFrames})");
 

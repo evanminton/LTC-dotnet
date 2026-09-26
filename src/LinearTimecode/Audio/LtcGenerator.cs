@@ -8,7 +8,7 @@ namespace LinearTimecode.Audio;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The generator is a pull source: call <see cref="Read"/> from an audio callback or in a loop. Bit timing is computed
+/// The generator is a pull source: call <see cref="Read(Span{float})"/> from an audio callback or in a loop. Bit timing is computed
 /// from the absolute sample index, so it never drifts, including at 1/1.001 rates. Setting <see cref="Speed"/> gives
 /// varispeed (the time address still advances by one per codeword).
 /// </para>
@@ -64,8 +64,24 @@ public sealed class LtcGenerator
     /// <summary>
     /// Play backwards: each codeword is sent bit 79 first and the address counts down — what a reader sees when a tape is
     /// played in reverse.
+    /// Changing it mid-stream takes effect from the next codeword, which continues from the one being output.
     /// </summary>
-    public bool Reverse { get; set; }
+    public bool Reverse
+    {
+        get => _reverse;
+        set
+        {
+            if (value == _reverse) return;
+            _reverse = value;
+            if (_currentFrame is not null)
+            {
+                var tc = _currentFrame.Timecode;
+                _frame = _frame with { Timecode = value ? tc.Previous() : tc.Next() };
+            }
+            _nextReady = false;
+        }
+    }
+    private bool _reverse;
 
     /// <summary>
     /// When the frame carries an ST 309 date (BGF 100/110), step the date at the 23:59:59:xx → 00:00:00:00 rollover
@@ -130,35 +146,43 @@ public sealed class LtcGenerator
         edgeHalfWidth = Math.Min(edgeHalfWidth, 0.45);
         float amp = Invert ? -Amplitude : Amplitude;
 
-        for (int i = 0; i < buffer.Length; i++)
+        int i = 0;
+        try
         {
-            long n = SamplePosition + i;
-            double p = _anchorPhase + (n - _anchorSample) * hcRate / SampleRate;
-            long h = (long)Math.Floor(p);
-            EnsureCodeword(Math.DivRem(h, HalfCellsPerCodeword, out _), n);
-
-            bool level = LevelAt(h);
-            double value = level ? 1 : -1;
-
-            if (edgeHalfWidth > 0)
+            for (; i < buffer.Length; i++)
             {
-                long b = (long)Math.Round(p);
-                double dist = p - b;
-                if (Math.Abs(dist) < edgeHalfWidth)
+                long n = SamplePosition + i;
+                double p = _anchorPhase + (n - _anchorSample) * hcRate / SampleRate;
+                long h = (long)Math.Floor(p);
+                EnsureCodeword(Math.DivRem(h, HalfCellsPerCodeword, out _), n);
+
+                bool level = LevelAt(h);
+                double value = level ? 1 : -1;
+
+                if (edgeHalfWidth > 0)
                 {
-                    bool before = LevelAt(b - 1), after = LevelAt(b);
-                    if (before != after)
+                    long b = (long)Math.Round(p);
+                    double dist = p - b;
+                    if (Math.Abs(dist) < edgeHalfWidth)
                     {
-                        double x = (dist / edgeHalfWidth + 1) / 2; // 0..1 across the edge
-                        double shape = 0.5 - 0.5 * Math.Cos(Math.PI * x);
-                        double from = before ? 1 : -1, to = after ? 1 : -1;
-                        value = from + (to - from) * shape;
+                        bool before = LevelAt(b - 1), after = LevelAt(b);
+                        if (before != after)
+                        {
+                            double x = (dist / edgeHalfWidth + 1) / 2; // 0..1 across the edge
+                            double shape = 0.5 - 0.5 * Math.Cos(Math.PI * x);
+                            double from = before ? 1 : -1, to = after ? 1 : -1;
+                            value = from + (to - from) * shape;
+                        }
                     }
                 }
+                buffer[i] = (float)(value * amp);
             }
-            buffer[i] = (float)(value * amp);
         }
-        SamplePosition += buffer.Length;
+        finally
+        {
+            // Keep the position in step with the codewords already consumed, even if a FrameHook throws.
+            SamplePosition += i;
+        }
     }
 
     /// <summary>Reads <paramref name="count"/> samples into a new array.</summary>

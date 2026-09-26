@@ -37,6 +37,7 @@ samples/LtcExplorer         .NET MAUI app (Generate / Read / Codeword / User Bit
 ```csharp
 using LinearTimecode;
 using LinearTimecode.Audio;
+using LinearTimecode.BinaryGroups;
 using LinearTimecode.Describe;
 
 // Time codes and drop-frame arithmetic
@@ -56,11 +57,13 @@ Console.WriteLine(LtcDescriber.Explain(cw, LtcFrameRate.Fps25));  // every field
 
 // Audio out: pull samples from any audio API callback
 var gen = new LtcGenerator(frame, sampleRate: 48_000) { Amplitude = 0.5f };
-gen.Read(buffer);
+float[] buffer = new float[480];
+gen.Read(buffer);                               // fills the next 10 ms
 
 // Audio in: push samples, get frames
 var reader = new LtcDecoder(48_000);            // or new LtcDecoder(48_000, LtcFrameRate.Fps25)
 reader.FrameDecoded += f => Console.WriteLine($"{f.Timecode} {f.Direction} x{f.Speed:0.00}");
+float[] samples = LtcGenerator.Render(frame, 25); // or audio from a sound card / file
 reader.Process(samples);
 
 // Files
@@ -68,7 +71,6 @@ WavFile.Write("tc.wav", LtcGenerator.Render(frame, 250), 48_000);
 var frames = LtcDecoder.DecodeAll(WavFile.Read("tc.wav").Channels[0], 48_000);
 
 // ST 309: date + time zone in the user bits (BGF 100, or 110 for clock time); the generator rolls the date at midnight
-using LinearTimecode.BinaryGroups;
 var dated = frame.WithDateTimeZone(new DateTimeZone(new DateOnly(2026, 9, 26), TimeZoneCode.Parse("+01:00")), clockTime: true);
 DateTimeOffset? when = dated.GetDateTimeZone()?.ToDateTimeOffset(dated.Timecode);
 

@@ -36,10 +36,7 @@ public sealed record DateTimeZone
     /// <summary>Creates a value from its parts.</summary>
     public DateTimeZone(DateOnly date, TimeZoneCode timeZone, DateFormat format = DateFormat.Yymmdd, bool daylightSaving = false)
     {
-        if (format == DateFormat.Yymmdd && (date.Year < 1900 + CenturyPivot || date.Year > 1999 + CenturyPivot))
-            throw new ArgumentOutOfRangeException(nameof(date), $"YYMMDD covers {1900 + CenturyPivot}–{1999 + CenturyPivot} with the current century pivot; use the MJD format for other years.");
-        if (format == DateFormat.ModifiedJulianDate && (date < MjdEpoch || ToMjd(date) > 999_999))
-            throw new ArgumentOutOfRangeException(nameof(date), "Date is outside the 6-digit MJD range.");
+        if (RangeError(date, format) is { } error) throw new ArgumentOutOfRangeException(nameof(date), error);
         Date = date;
         TimeZone = timeZone;
         Format = format;
@@ -64,6 +61,15 @@ public sealed record DateTimeZone
     /// <summary>True when the time address carries UTC (MJD format); false when it carries local time.</summary>
     public bool TimeAddressIsUtc => Format == DateFormat.ModifiedJulianDate;
 
+    // Why the date can't be written in the format, or null.
+    private static string? RangeError(DateOnly date, DateFormat format) => format switch
+    {
+        DateFormat.Yymmdd when date.Year < 1900 + CenturyPivot || date.Year > 1999 + CenturyPivot =>
+            $"YYMMDD covers {1900 + CenturyPivot}–{1999 + CenturyPivot} with the current century pivot; use the MJD format for other years.",
+        DateFormat.ModifiedJulianDate when date < MjdEpoch || ToMjd(date) > 999_999 => "Date is outside the 6-digit MJD range.",
+        _ => null,
+    };
+
     public static int ToMjd(DateOnly date) => date.DayNumber - MjdEpoch.DayNumber;
     public static DateOnly FromMjd(int mjd) => DateOnly.FromDayNumber(MjdEpoch.DayNumber + mjd);
 
@@ -78,9 +84,13 @@ public sealed record DateTimeZone
         return new DateTimeZone(date, tz, format, daylightSaving);
     }
 
-    /// <summary>Encodes into the 32 user bits.</summary>
+    /// <summary>
+    /// Encodes into the 32 user bits. Throws <see cref="InvalidOperationException"/> when <see cref="Date"/> can't be
+    /// written in <see cref="Format"/> (possible after a <c>with</c> expression, which skips the constructor's checks).
+    /// </summary>
     public UserBits ToUserBits()
     {
+        if (RangeError(Date, Format) is { } error) throw new InvalidOperationException(error);
         int[] digits = Format == DateFormat.Yymmdd
             ? [Date.Day % 10, Date.Day / 10, Date.Month % 10, Date.Month / 10, Date.Year % 10, Date.Year / 10 % 10]
             : [.. Enumerable.Range(0, 6).Select(i => Mjd / (int)Math.Pow(10, i) % 10)];
@@ -145,13 +155,17 @@ public sealed record DateTimeZone
             : new DateTimeOffset(dt, offset);
     }
 
-    /// <summary>The same value one day later/earlier (the §5.4 midnight rollover).</summary>
-    public DateTimeZone AddDays(int days) => this with { Date = Date.AddDays(days) };
+    /// <summary>
+    /// The same value <paramref name="days"/> later/earlier (the §5.4 midnight rollover). Throws
+    /// <see cref="ArgumentOutOfRangeException"/> when the result can't be written in <see cref="Format"/>.
+    /// </summary>
+    public DateTimeZone AddDays(int days) => new(Date.AddDays(days), TimeZone, Format, DaylightSaving);
 
     /// <summary>Problems with this value against ST 309.</summary>
     public IReadOnlyList<string> Validate()
     {
         var issues = new List<string>();
+        if (RangeError(Date, Format) is { } error) issues.Add(error);
         switch (TimeZone.Kind)
         {
             case TimeZoneCodeKind.Reserved: issues.Add($"Time zone code {TimeZone.Hex} is reserved and shall not be used."); break;

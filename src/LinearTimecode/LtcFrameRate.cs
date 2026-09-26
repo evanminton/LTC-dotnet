@@ -104,7 +104,10 @@ public static class LtcFrameRateExtensions
     public static TimeSpan CodewordDuration(this LtcFrameRate rate) => TimeSpan.FromSeconds(1.0 / rate.CodewordRate());
 
     /// <summary>Duration of one bit cell (1/Fe).</summary>
-    public static TimeSpan BitPeriod(this LtcFrameRate rate) => TimeSpan.FromSeconds(1.0 / rate.BitRate());
+    public static TimeSpan BitPeriod(this LtcFrameRate rate) => TimeSpan.FromTicks((long)Math.Round(TimeSpan.TicksPerSecond / rate.BitRate()));
+
+    /// <summary>Duration of one bit cell in microseconds, unrounded.</summary>
+    public static double BitPeriodMicroseconds(this LtcFrameRate rate) => 1e6 / rate.BitRate();
 
     /// <summary>Number of time addresses in 24 hours (drop-frame omits 2 × 54 per hour).</summary>
     public static int AddressesPerDay(this LtcFrameRate rate) => rate.IsDropFrame() ? 2_589_408 : 86_400 * rate.FramesPerSecond();

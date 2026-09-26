@@ -155,7 +155,13 @@ public readonly record struct TimeZoneCode
         ArgumentNullException.ThrowIfNull(text);
         string s = text.Trim();
         if (s.Equals("UTC", StringComparison.OrdinalIgnoreCase) || s.Equals("Z", StringComparison.OrdinalIgnoreCase) || s.Equals("GMT", StringComparison.OrdinalIgnoreCase)) return Utc;
-        if (s.StartsWith("UTC", StringComparison.OrdinalIgnoreCase) || s.StartsWith("GMT", StringComparison.OrdinalIgnoreCase)) s = s[3..];
+        if (s.StartsWith("UTC", StringComparison.OrdinalIgnoreCase) || s.StartsWith("GMT", StringComparison.OrdinalIgnoreCase))
+        {
+            s = s[3..].TrimStart();
+            // "UTC5" is ambiguous (offset +5 or code 05 = UTC−05:00); after UTC/GMT only a signed offset is accepted.
+            if (s.Length == 0 || (s[0] != '+' && s[0] != '-'))
+                throw new FormatException($"'{text}': write the offset with a sign, e.g. UTC+5 or UTC-05:00.");
+        }
         if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s[2..];
 
         if (s.Length > 0 && (s[0] == '+' || s[0] == '-'))

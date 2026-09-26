@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace LinearTimecode.BinaryGroups;
 
@@ -20,7 +21,7 @@ public enum DirectoryCategory
 /// The SMPTE ST 262 directory index: binary group 8 = page (0–15), binary group 7 = line (0–15) (§3.1.3).
 /// It is also binary byte 4.
 /// </summary>
-public readonly record struct DirectoryIndex : IComparable<DirectoryIndex>
+public readonly partial record struct DirectoryIndex : IComparable<DirectoryIndex>
 {
     public DirectoryIndex(int page, int line)
     {
@@ -65,20 +66,28 @@ public readonly record struct DirectoryIndex : IComparable<DirectoryIndex>
     /// <summary>ST 262 §3.4.5: higher page wins, then higher line. Positive when this has priority over <paramref name="other"/>.</summary>
     public int CompareTo(DirectoryIndex other) => Byte.CompareTo(other.Byte);
 
-    /// <summary>Parses "15.3", "15/3", "p15 l3" or a hex byte "F3".</summary>
+    /// <summary>Parses "15.3", "15/3", "p15 l3", "page 15 line 3", "line 3 page 15" or a hex byte "F3".</summary>
     public static DirectoryIndex Parse(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
-        string s = text.Trim().ToLowerInvariant().Replace("page", "", StringComparison.Ordinal).Replace("line", "", StringComparison.Ordinal)
-            .Replace("p", "", StringComparison.Ordinal).Replace("l", " ", StringComparison.Ordinal);
+        string s = text.Trim();
+        if (KeywordForm().Match(s) is { Success: true } m && char.ToLowerInvariant(m.Groups["k1"].Value[0]) != char.ToLowerInvariant(m.Groups["k2"].Value[0]))
+        {
+            bool pageFirst = char.ToLowerInvariant(m.Groups["k1"].Value[0]) == 'p';
+            int first = int.Parse(m.Groups["n1"].Value, CultureInfo.InvariantCulture), second = int.Parse(m.Groups["n2"].Value, CultureInfo.InvariantCulture);
+            return pageFirst ? new DirectoryIndex(first, second) : new DirectoryIndex(second, first);
+        }
         string[] parts = s.Split(['.', '/', ',', ':', ' '], StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 2 && int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out int p) && int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out int l))
             return new DirectoryIndex(p, l);
-        string hex = s.Replace("0x", "", StringComparison.Ordinal);
+        string hex = s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s;
         if (parts.Length == 1 && hex.Length is 1 or 2 && byte.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out byte b))
             return FromByte(b);
         throw new FormatException($"'{text}' is not a directory index (page.line, e.g. 15.3, or a hex byte).");
     }
+
+    [GeneratedRegex(@"^(?<k1>p(?:age)?|l(?:ine)?)\s*(?<n1>\d+)\s*[.,/ ]?\s*(?<k2>p(?:age)?|l(?:ine)?)\s*(?<n2>\d+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex KeywordForm();
 
     public override string ToString() => $"{Page}.{Line}";
 }
@@ -193,8 +202,25 @@ public readonly record struct PageLineFrame(DirectoryIndex Index, byte Byte1, by
 /// ST 262 message strings (§3.4.3): prefix frame(s), message frame(s) and suffix frame(s), each identified by its own
 /// directory index (assigned by the application dialect). At most 256 frames.
 /// </summary>
-public sealed record PageLineMessageLayout(DirectoryIndex Prefix, DirectoryIndex Message, DirectoryIndex Suffix)
+public sealed record PageLineMessageLayout
 {
+    /// <summary>Creates a layout. The three directory indexes must differ, or frames couldn't be told apart.</summary>
+    public PageLineMessageLayout(DirectoryIndex prefix, DirectoryIndex message, DirectoryIndex suffix)
+    {
+        if (prefix == message || prefix == suffix || message == suffix)
+            throw new ArgumentException($"Prefix, message and suffix need different directory indexes (got {prefix}, {message}, {suffix}).");
+        Prefix = prefix;
+        Message = message;
+        Suffix = suffix;
+    }
+
+    public DirectoryIndex Prefix { get; }
+    public DirectoryIndex Message { get; }
+    public DirectoryIndex Suffix { get; }
+
+    public void Deconstruct(out DirectoryIndex prefix, out DirectoryIndex message, out DirectoryIndex suffix) =>
+        (prefix, message, suffix) = (Prefix, Message, Suffix);
+
     public const int MaxFrames = 256;
 
     /// <summary>Default layout used by this library's tools: application page 3, lines 0 (prefix), 1 (message), 2 (suffix).</summary>
@@ -234,6 +260,8 @@ public sealed record PageLineMessageLayout(DirectoryIndex Prefix, DirectoryIndex
     /// <summary>
     /// Reassembles complete messages from a sequence of frames (e.g. the user bits of consecutive codewords).
     /// Frames with other directory indexes are skipped; a prefix restarts collection; a suffix completes a message.
+    /// The message frames' null fill (at most two trailing 0x00 bytes of the last frame) is removed; the string format
+    /// carries no byte count, so binary data that itself ends in 0x00 bytes can't be told from the fill.
     /// </summary>
     public IReadOnlyList<PageLineMessage> Decode(IEnumerable<PageLineFrame> frames)
     {
@@ -247,7 +275,7 @@ public sealed record PageLineMessageLayout(DirectoryIndex Prefix, DirectoryIndex
             else if (f.Index == Suffix && data is not null)
             {
                 int end = data.Count;
-                while (end > 0 && data[end - 1] == 0) end--; // strip null fill
+                for (int i = 0; i < 2 && end > 0 && data[end - 1] == 0; i++) end--; // strip the last frame's null fill
                 result.Add(new PageLineMessage(prefix, f, [.. data.Take(end)]));
                 data = null;
             }
