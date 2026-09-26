@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>LinearTimecode</RootNamespace>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <PackageId>LinearTimecode</PackageId>
+    <Description>SMPTE Linear Time Code (LTC) for .NET: time address and drop-frame arithmetic, the 80-bit LTC codeword with flags and binary groups, a biphase-mark audio generator and a streaming decoder (forward, reverse and varispeed). Implements SMPTE ST 12-1:2014.</Description>
+    <PackageTags>ltc;smpte;timecode;st12;biphase;audio;sync;maui</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <InternalsVisibleTo Include="LinearTimecode.Tests" />
+  </ItemGroup>
+
+</Project>
