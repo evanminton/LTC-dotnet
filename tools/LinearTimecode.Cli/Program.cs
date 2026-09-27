@@ -236,18 +236,7 @@ internal static class Program
         }
         var format = ParseFormat(a.Value("format") ?? "pcm16");
         long samples = (long)Math.Ceiling(LtcGenerator.SamplesFor(frames, rate, sr) / speed);
-        // Write to a temporary file and move it into place, so a failure (e.g. a full disk) leaves no truncated
-        // file behind and doesn't destroy an existing file of the same name.
-        string temp = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
-        try
-        {
-            using (var fs = File.Create(temp)) WavFile.Write(fs, sr, samples, gen.Read, format);
-            File.Move(temp, path, overwrite: true);
-        }
-        finally
-        {
-            try { File.Delete(temp); } catch (IOException) { } // best effort; don't hide the original error
-        }
+        WriteOutput(path, fs => WavFile.Write(fs, sr, samples, gen.Read, format));
 
         var last = gen.Reverse ? frame.Timecode.AddFrames(-(frames - 1)) : frame.Timecode.AddFrames(frames - 1);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -499,6 +488,63 @@ internal static class Program
         }
         else if (Enum.TryParse<BinaryGroupFlags>(s, true, out var f) && Enum.IsDefined(f)) return f;
         throw new FormatException($"--bgf expects 0–7, a 3-bit pattern like 110, or one of {string.Join(", ", Enum.GetNames<BinaryGroupFlags>())}.");
+    }
+
+    /// <summary>
+    /// Writes a regular file through a temporary file in the same directory that is moved into place, so a failed
+    /// write (e.g. a full disk) leaves no truncated file and keeps an existing file intact. Devices, pipes, symlinks,
+    /// and directories where a temporary file can't be created are written directly.
+    /// </summary>
+    private static void WriteOutput(string path, Action<Stream> write)
+    {
+        var existing = new FileInfo(path);
+        if (existing.Exists && (existing.LinkTarget is not null || (existing.Attributes & (FileAttributes.Device | FileAttributes.ReparsePoint)) != 0))
+        {
+            WriteDirect(path, write); // symlink or device: write through it
+            return;
+        }
+        if (existing.Exists)
+        {
+            // Pipes and character devices can't seek; write into them rather than replacing them.
+            var target = new FileStream(path, FileMode.Open, FileAccess.Write);
+            if (!target.CanSeek)
+            {
+                using (target) write(target);
+                return;
+            }
+            target.Dispose();
+        }
+
+        string? temp = null;
+        FileStream? fs = null;
+        if (!Directory.Exists(path))
+        {
+            temp = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+            try { fs = new FileStream(temp, FileMode.CreateNew); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { temp = null; } // e.g. read-only directory
+        }
+        if (fs is null)
+        {
+            WriteDirect(path, write);
+            return;
+        }
+
+        try
+        {
+            using (fs) write(fs);
+            if (existing.Exists && !OperatingSystem.IsWindows()) File.SetUnixFileMode(temp!, File.GetUnixFileMode(path));
+            File.Move(temp!, path, overwrite: true);
+        }
+        finally
+        {
+            try { File.Delete(temp!); } catch (IOException) { } // best effort; don't hide the original error
+        }
+    }
+
+    private static void WriteDirect(string path, Action<Stream> write)
+    {
+        using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
+        write(fs);
     }
 
     private static readonly string[] ContentOptions = ["ub", "text", "date", "pageline"];
