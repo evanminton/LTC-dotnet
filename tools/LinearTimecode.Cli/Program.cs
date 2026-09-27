@@ -236,15 +236,17 @@ internal static class Program
         }
         var format = ParseFormat(a.Value("format") ?? "pcm16");
         long samples = (long)Math.Ceiling(LtcGenerator.SamplesFor(frames, rate, sr) / speed);
+        // Write to a temporary file and move it into place, so a failure (e.g. a full disk) leaves no truncated
+        // file behind and doesn't destroy an existing file of the same name.
+        string temp = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
         try
         {
-            using var fs = File.Create(path);
-            WavFile.Write(fs, sr, samples, gen.Read, format);
+            using (var fs = File.Create(temp)) WavFile.Write(fs, sr, samples, gen.Read, format);
+            File.Move(temp, path, overwrite: true);
         }
-        catch (Exception ex) when (ex is not IOException and not UnauthorizedAccessException)
+        finally
         {
-            File.Delete(path); // don't leave a truncated file behind
-            throw;
+            try { File.Delete(temp); } catch (IOException) { } // best effort; don't hide the original error
         }
 
         var last = gen.Reverse ? frame.Timecode.AddFrames(-(frames - 1)) : frame.Timecode.AddFrames(frames - 1);

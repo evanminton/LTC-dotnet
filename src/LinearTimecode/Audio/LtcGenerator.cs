@@ -27,6 +27,8 @@ public sealed class LtcGenerator
     private bool _prevLast;          // level of the last half-cell of the previous codeword
     private long _codewordIndex = -1; // index of the codeword whose levels are in _levels
     private LtcFrame _frame;          // frame to encode for the next codeword to be generated
+    private LtcFrame? _currentSource; // _frame as it was when the current codeword was prepared (before FrameHook)
+    private bool _nextFrameSet;       // NextFrame was set since the current codeword started
 
     private long _anchorSample;
     private double _anchorPhase;      // in half-cells
@@ -64,7 +66,8 @@ public sealed class LtcGenerator
     /// <summary>
     /// Play backwards: each codeword is sent bit 79 first and the address counts down — what a reader sees when a tape is
     /// played in reverse.
-    /// Changing it mid-stream takes effect from the next codeword, which continues from the one being output.
+    /// Changing it mid-stream takes effect from the next codeword, which continues from the one being output (or from
+    /// <see cref="NextFrame"/>, if that was set since the current codeword started).
     /// </summary>
     public bool Reverse
     {
@@ -73,11 +76,7 @@ public sealed class LtcGenerator
         {
             if (value == _reverse) return;
             _reverse = value;
-            if (_currentFrame is not null)
-            {
-                var tc = _currentFrame.Timecode;
-                _frame = _frame with { Timecode = value ? tc.Previous() : tc.Next() };
-            }
+            if (_currentSource is not null && !_nextFrameSet) _frame = Step(_currentSource);
             _nextReady = false;
         }
     }
@@ -125,6 +124,7 @@ public sealed class LtcGenerator
             if (value.Rate.Base() != _frame.Rate.Base() || value.Rate.CodewordRate() != _frame.Rate.CodewordRate())
                 throw new ArgumentException("The frame rate cannot change while generating; create a new generator.", nameof(value));
             _frame = value;
+            _nextFrameSet = true;
             _nextReady = false;
         }
     }
@@ -227,12 +227,20 @@ public sealed class LtcGenerator
             _currentFrame = _nextReadyFrame;
             _nextReady = false;
             _codewordIndex++;
-            var previous = _frame;
-            _frame = Reverse ? _frame with { Timecode = _frame.Timecode.Previous() } : _frame.Next();
-            if (AdvanceDateAtMidnight && (Reverse ? previous.Timecode.TotalFrames == 0 : _frame.Timecode.TotalFrames == 0))
-                _frame = _frame.RollDate(Reverse ? -1 : 1);
+            _currentSource = _frame;
+            _nextFrameSet = false;
+            _frame = Step(_frame);
             if (_currentFrame is not null) FrameStarted?.Invoke(_currentFrame, sample);
         }
+    }
+
+    // The frame after f in the current direction, stepping an ST 309 date at the midnight rollover (§5.4).
+    private LtcFrame Step(LtcFrame f)
+    {
+        var next = Reverse ? f with { Timecode = f.Timecode.Previous() } : f.Next();
+        if (AdvanceDateAtMidnight && (Reverse ? f.Timecode.TotalFrames == 0 : next.Timecode.TotalFrames == 0))
+            next = next.RollDate(Reverse ? -1 : 1);
+        return next;
     }
 
     private void PrepareNext()

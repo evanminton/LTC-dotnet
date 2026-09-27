@@ -83,6 +83,42 @@ public class RegressionTests
     }
 
     [Fact]
+    public void ReverseToggleAtMidnightKeepsTheDate()
+    {
+        var day = new DateOnly(2026, 9, 26);
+        var frame = new LtcFrame(new Timecode(23, 59, 59, 24, LtcFrameRate.Fps25))
+            .WithDateTimeZone(new DateTimeZone(day, TimeZoneCode.Utc));
+        var gen = new LtcGenerator(frame, 48_000);
+        gen.Read(10); // outputting 23:59:59:24; the queued next frame is 00:00:00:00 on the 27th
+        Assert.Equal(day.AddDays(1), gen.NextFrame.GetDateTimeZone()!.Date);
+        gen.Reverse = true;
+        Assert.Equal(new Timecode(23, 59, 59, 23, LtcFrameRate.Fps25), gen.NextFrame.Timecode);
+        Assert.Equal(day, gen.NextFrame.GetDateTimeZone()!.Date);
+
+        // Reverse across midnight steps the date back; switching forward again steps it on.
+        var gen2 = new LtcGenerator(frame with { Timecode = Timecode.Zero(LtcFrameRate.Fps25) }, 48_000) { Reverse = true };
+        gen2.Read(10); // outputting 00:00:00:00 on the 26th; queued 23:59:59:24 on the 25th
+        Assert.Equal(day.AddDays(-1), gen2.NextFrame.GetDateTimeZone()!.Date);
+        gen2.Reverse = false;
+        Assert.Equal(new Timecode(0, 0, 0, 1, LtcFrameRate.Fps25), gen2.NextFrame.Timecode);
+        Assert.Equal(day, gen2.NextFrame.GetDateTimeZone()!.Date);
+    }
+
+    [Fact]
+    public void ReverseToggleKeepsAnExplicitNextFrame()
+    {
+        var gen = new LtcGenerator(new Timecode(0, 0, 1, 0, LtcFrameRate.Fps25), 48_000);
+        gen.Read(1920 * 5 + 10);
+        var jump = new LtcFrame(new Timecode(10, 0, 0, 0, LtcFrameRate.Fps25));
+        gen.NextFrame = jump;
+        gen.Reverse = true;
+        Assert.Equal(jump, gen.NextFrame);
+        gen.Read(1920);
+        Assert.Equal(jump.Timecode, gen.CurrentFrame!.Timecode);
+        Assert.Equal(new Timecode(9, 59, 59, 24, LtcFrameRate.Fps25), gen.NextFrame.Timecode);
+    }
+
+    [Fact]
     public void GeneratorAtTheEndOfTheYymmddRangeKeepsItsDate()
     {
         var frame = new LtcFrame(new Timecode(23, 59, 59, 24, LtcFrameRate.Fps25))
