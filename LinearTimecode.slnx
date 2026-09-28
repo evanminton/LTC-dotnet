@@ -8,6 +8,9 @@
   <Folder Name="/tests/">
     <Project Path="tests/LinearTimecode.Tests/LinearTimecode.Tests.csproj" />
   </Folder>
+  <Folder Name="/apps/">
+    <Project Path="apps/LtcStudio/LtcStudio.csproj" />
+  </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/LtcExplorer/LtcExplorer.csproj" />
   </Folder>

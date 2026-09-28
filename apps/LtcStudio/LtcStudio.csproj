@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    LTC Studio: Windows-only, standalone (self-contained, unpackaged) MAUI app.
+    Live LTC reader (sound-card input or loopback) and generator (sound-card output) over WASAPI,
+    plus every LinearTimecode tool: WAV generate/read, codeword, user bits, calculator, reference.
+
+    Build:    dotnet build apps/LtcStudio -c Debug|Release
+    Run:      dotnet run (project apps/LtcStudio)
+    Publish:  ./publish.ps1   (folder + zip under artifacts/, no .NET or Windows App SDK install needed)
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>LtcStudio</RootNamespace>
+    <AssemblyName>LtcStudio</AssemblyName>
+    <UseMaui>true</UseMaui>
+    <SingleProject>true</SingleProject>
+
+    <ApplicationTitle>LTC Studio</ApplicationTitle>
+    <ApplicationId>com.lineartimecode.ltcstudio</ApplicationId>
+    <ApplicationDisplayVersion>$(Version)</ApplicationDisplayVersion>
+    <ApplicationVersion>1</ApplicationVersion>
+
+    <!-- Standalone: no MSIX, no .NET runtime install, no Windows App SDK runtime install. -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <MauiIcon Include="Resources\AppIcon\appicon.svg" ForegroundFile="Resources\AppIcon\appiconfg.svg" Color="#0F2A2E" />
+    <MauiSplashScreen Include="Resources\Splash\splash.svg" Color="#0F2A2E" BaseSize="128,128" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
+    <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\LinearTimecode\LinearTimecode.csproj" />
+  </ItemGroup>
+
+</Project>
