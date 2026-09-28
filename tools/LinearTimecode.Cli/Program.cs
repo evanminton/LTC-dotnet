@@ -493,14 +493,14 @@ internal static class Program
     /// <summary>
     /// Writes a regular file through a temporary file in the same directory that is moved into place, so a failed
     /// write (e.g. a full disk) leaves no truncated file and keeps an existing file intact. Devices, pipes, symlinks,
-    /// and directories where a temporary file can't be created are written directly.
+    /// and directories where we may not create a temporary file are written directly.
     /// </summary>
     private static void WriteOutput(string path, Action<Stream> write)
     {
         var existing = new FileInfo(path);
-        if (existing.Exists && (existing.LinkTarget is not null || (existing.Attributes & (FileAttributes.Device | FileAttributes.ReparsePoint)) != 0))
+        if (IsDevice(path) || (existing.Exists && (existing.LinkTarget is not null || (existing.Attributes & (FileAttributes.Device | FileAttributes.ReparsePoint)) != 0)))
         {
-            WriteDirect(path, write); // symlink or device: write through it
+            WriteDirect(path, write); // device or symlink: write through it
             return;
         }
         if (existing.Exists)
@@ -519,9 +519,12 @@ internal static class Program
         FileStream? fs = null;
         if (!Directory.Exists(path))
         {
-            temp = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+            // A short name, so a long output file name can't push it over the file system's name limit.
+            temp = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, $".ltc-{Guid.NewGuid().ToString("N")[..12]}.tmp");
+            // Only a permission problem (e.g. a read-only directory holding a writable file) falls back to writing in
+            // place; anything else, such as a full disk, fails here and leaves the existing file untouched.
             try { fs = new FileStream(temp, FileMode.CreateNew); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { temp = null; } // e.g. read-only directory
+            catch (UnauthorizedAccessException) { temp = null; }
         }
         if (fs is null)
         {
@@ -539,6 +542,18 @@ internal static class Program
         {
             try { File.Delete(temp!); } catch (IOException) { } // best effort; don't hide the original error
         }
+    }
+
+    // .NET reports Unix device nodes as ordinary files (and /dev/null as seekable), so recognise them by location;
+    // on Windows, by the \\.\ device namespace prefix or a reserved device name.
+    private static bool IsDevice(string path)
+    {
+        string full = Path.GetFullPath(path);
+        if (!OperatingSystem.IsWindows()) return full.StartsWith("/dev/", StringComparison.Ordinal);
+        if (path.StartsWith(@"\\.\", StringComparison.Ordinal)) return true;
+        string name = Path.GetFileNameWithoutExtension(path).TrimEnd(' ', '.').ToUpperInvariant();
+        return name is "CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$" ||
+               (name.Length == 4 && (name.StartsWith("COM", StringComparison.Ordinal) || name.StartsWith("LPT", StringComparison.Ordinal)) && char.IsAsciiDigit(name[3]));
     }
 
     private static void WriteDirect(string path, Action<Stream> write)
