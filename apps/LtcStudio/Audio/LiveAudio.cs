@@ -13,9 +13,11 @@ namespace LtcStudio.Audio;
 public sealed class LiveReader : IDisposable
 {
     private readonly object _lock = new();
-    // Serialises Start/Stop: two overlapping starts (e.g. a rate change, then a device change) would otherwise both
-    // store their device, and the first would keep playing with nothing left to stop it.
+    // Start runs one at a time under _startGate. _request numbers every Start and Stop call: a start that is no longer
+    // the latest request doesn't open its device (or closes it again), so overlapping restarts end on the newest one
+    // whatever order they get the gate in, and Stop never has to wait for a device that is still opening.
     private readonly object _startGate = new();
+    private long _request;
     private MMDevice? _device;
     private WasapiCapture? _capture;
     private LtcDecoder? _decoder;
@@ -79,15 +81,33 @@ public sealed class LiveReader : IDisposable
     /// <summary>Frame rate detected by the decoder.</summary>
     public LtcFrameRate? DetectedRate { get { lock (_lock) return _decoder?.DetectedRate; } }
 
-    /// <summary>Opens the endpoint and starts decoding. Call from a background thread (WASAPI setup blocks briefly).</summary>
-    public void Start(AudioEndpoint endpoint, int channel)
+    /// <summary>Opens the endpoint and starts decoding; the WASAPI setup runs on a background thread.</summary>
+    /// <remarks>
+    /// The request is numbered on the calling thread before any work starts, so the latest call wins even when the
+    /// background opens finish in a different order.
+    /// </remarks>
+    /// <returns>False when a later start or <see cref="Stop"/> superseded this call (nothing was left running).</returns>
+    public Task<bool> StartAsync(AudioEndpoint endpoint, int channel)
     {
-        lock (_startGate) StartCore(endpoint, channel);
+        long id = Interlocked.Increment(ref _request);
+        return Task.Run(() => Start(id, endpoint, channel));
+    }
+
+    private bool Start(long id, AudioEndpoint endpoint, int channel)
+    {
+        lock (_startGate)
+        {
+            if (Interlocked.Read(ref _request) != id) return false;
+            StartCore(endpoint, channel);
+            if (Interlocked.Read(ref _request) == id) return true;
+            StopCore(); // a Stop or newer Start arrived while the device was opening
+            return false;
+        }
     }
 
     private void StartCore(AudioEndpoint endpoint, int channel)
     {
-        Stop();
+        StopCore();
         var device = AudioDevices.Open(endpoint.Id);
         WasapiCapture capture;
         try
@@ -130,7 +150,7 @@ public sealed class LiveReader : IDisposable
         }
         catch
         {
-            Stop();
+            StopCore();
             throw;
         }
     }
@@ -138,7 +158,8 @@ public sealed class LiveReader : IDisposable
     /// <summary>Stops capture and releases the device.</summary>
     public void Stop()
     {
-        lock (_startGate) StopCore();
+        Interlocked.Increment(ref _request); // cancels a start that is still opening its device
+        StopCore();
     }
 
     private void StopCore()
@@ -224,9 +245,11 @@ public sealed record OutputChannel(int Channel, string Name)
 public sealed class LiveGenerator : IDisposable
 {
     private readonly object _lock = new();
-    // Serialises Start/Stop: two overlapping starts (e.g. a rate change, then a device change) would otherwise both
-    // store their device, and the first would keep playing with nothing left to stop it.
+    // Start runs one at a time under _startGate. _request numbers every Start and Stop call: a start that is no longer
+    // the latest request doesn't open its device (or closes it again), so overlapping restarts end on the newest one
+    // whatever order they get the gate in, and Stop never has to wait for a device that is still opening.
     private readonly object _startGate = new();
+    private long _request;
     private MMDevice? _device;
     private WasapiOut? _out;
     private LtcGenerator? _generator;
@@ -267,16 +290,34 @@ public sealed class LiveGenerator : IDisposable
 
     /// <summary>
     /// Opens the endpoint and starts playing. <paramref name="create"/> receives the endpoint's sample rate and the
-    /// output latency, and returns the generator to play. Call from a background thread.
+    /// output latency, and returns the generator to play (on a background thread).
     /// </summary>
-    public void Start(AudioEndpoint endpoint, int channel, int latencyMs, Func<int, TimeSpan, LtcGenerator> create)
+    /// <remarks>
+    /// The request is numbered on the calling thread before any work starts, so the latest call wins even when the
+    /// background opens finish in a different order.
+    /// </remarks>
+    /// <returns>False when a later start or <see cref="Stop"/> superseded this call (nothing was left running).</returns>
+    public Task<bool> StartAsync(AudioEndpoint endpoint, int channel, int latencyMs, Func<int, TimeSpan, LtcGenerator> create)
     {
-        lock (_startGate) StartCore(endpoint, channel, latencyMs, create);
+        long id = Interlocked.Increment(ref _request);
+        return Task.Run(() => Start(id, endpoint, channel, latencyMs, create));
+    }
+
+    private bool Start(long id, AudioEndpoint endpoint, int channel, int latencyMs, Func<int, TimeSpan, LtcGenerator> create)
+    {
+        lock (_startGate)
+        {
+            if (Interlocked.Read(ref _request) != id) return false;
+            StartCore(endpoint, channel, latencyMs, create);
+            if (Interlocked.Read(ref _request) == id) return true;
+            StopCore(); // a Stop or newer Start arrived while the device was opening
+            return false;
+        }
     }
 
     private void StartCore(AudioEndpoint endpoint, int channel, int latencyMs, Func<int, TimeSpan, LtcGenerator> create)
     {
-        Stop();
+        StopCore();
         var device = AudioDevices.Open(endpoint.Id);
         WasapiOut? output = null;
         try
@@ -318,7 +359,8 @@ public sealed class LiveGenerator : IDisposable
     /// <summary>Stops playback and releases the device.</summary>
     public void Stop()
     {
-        lock (_startGate) StopCore();
+        Interlocked.Increment(ref _request); // cancels a start that is still opening its device
+        StopCore();
     }
 
     private void StopCore()

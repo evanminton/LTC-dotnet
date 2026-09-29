@@ -216,7 +216,7 @@ public class LiveReaderPage : ContentPage
         {
             _reader.Rate = Ui.SelectedRate(_rate, withAuto: true);
             _reader.MinimumLevel = Math.Pow(10, _minLevel.Value / 20);
-            await Task.Run(() => _reader.Start(ep, channel));
+            if (!await _reader.StartAsync(ep, channel)) return; // superseded by a later start or stop
             ClearStats();
             _start.Text = "Stop";
             Status($"Reading {ep.DisplayName}, channel {channel + 1} ({_reader.FormatDescription}).");

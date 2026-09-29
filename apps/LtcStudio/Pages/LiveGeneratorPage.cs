@@ -309,14 +309,15 @@ public class LiveGeneratorPage : ContentPage
         _start.IsEnabled = false;
         try
         {
-            await Task.Run(() => _gen.Start(ep, channel, latencyMs, (sampleRate, latency) =>
+            bool started = await _gen.StartAsync(ep, channel, latencyMs, (sampleRate, latency) =>
             {
                 // Time of day: the first sample reaches the output one buffer from now.
                 var first = content with { Timecode = timeOfDay ? ClockTimecode(content, rate, latency) : start };
                 var g = new LtcGenerator(first, sampleRate);
                 Configure(g, first);
                 return g;
-            }));
+            });
+            if (!started) return; // superseded by a later start or stop
             _startedAt = DateTime.Now;
             _driftChecks = 0;
             _start.Text = "Stop";
