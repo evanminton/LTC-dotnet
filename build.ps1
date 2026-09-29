@@ -2,7 +2,7 @@
 .SYNOPSIS
   Builds and tests LinearTimecode in Debug and/or Release.
 .EXAMPLE
-  ./build.ps1                         # Debug + Release, library, CLI, tests, MAUI app (Windows)
+  ./build.ps1                         # Debug + Release, library, CLI, tests, LTC Studio + LtcExplorer (Windows)
   ./build.ps1 -Configuration Release  # one configuration
   ./build.ps1 -SkipApp                # skip the MAUI app
 #>
@@ -29,9 +29,10 @@ foreach ($c in $configs) {
     if (-not $SkipTests) { Run "Test ($c)" @('test', 'tests/LinearTimecode.Tests', '-c', $c, '--nologo') }
     if (-not $SkipApp) {
         if ($IsWindows -or $env:OS -eq 'Windows_NT') {
+            Run "Build LTC Studio ($c)" @('build', 'apps/LtcStudio', '-c', $c, '--nologo')
             Run "Build LtcExplorer ($c)" @('build', 'samples/LtcExplorer', '-c', $c, '-f', 'net10.0-windows10.0.19041.0', '--nologo')
         } else {
-            Write-Host "Skipping LtcExplorer (Windows target only in this script)." -ForegroundColor Yellow
+            Write-Host "Skipping LTC Studio and LtcExplorer (Windows target only in this script)." -ForegroundColor Yellow
         }
     }
 }

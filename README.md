@@ -8,6 +8,7 @@ Every value the spec defines has a human-readable name and description. The `Ltc
 src/LinearTimecode          the library
 tools/LinearTimecode.Cli    `ltc` command-line utility (dotnet tool)
 tests/LinearTimecode.Tests  xUnit tests (spec tables, drop-frame arithmetic, audio round trips)
+apps/LtcStudio              LTC Studio: standalone Windows MAUI app, live LTC reader/generator on sound cards + all tools
 samples/LtcExplorer         .NET MAUI app (Generate / Read / Codeword / User Bits / Calculator / Reference)
 ```
 
@@ -117,6 +118,29 @@ ltc diff 01:00:00:00 02:00:00:00 --rate 23.98
 ltc convert 00:00:10:00 --rate 25 --to 29.97df
 ```
 
+## LTC Studio (Windows)
+
+A Windows-only MAUI app that works with real sound cards (WASAPI shared mode, via NAudio), and ships standalone: self-contained .NET and Windows App SDK, unpackaged — run it from the portable zip or install it with the setup.exe; no runtime needed either way.
+
+* **Live Reader** — pick any input (or *Loopback* of an output), channel, frame rate or auto-detect and minimum level. Big time-code display, lock state, input meter, detected rate, measured speed and direction, user bits and what they mean (ST 309 date, ST 262 page/line), color frame, polarity, codeword hex, spec issues, and an event log of jumps, dropouts and direction changes. *Explain frame* shows the live codeword bit by bit.
+* **Live Generator** — pick any output and channel (or all). Start from a time code or jam to time of day (latency-compensated, optional follow-the-PC-clock re-jam). Locate while running. User bits, BGF, color frame, polarity, level, rise time, speed, invert and reverse all change live. User bits built on the User Bits tab (ST 309, ST 262 messages, RP 169 running auxiliary address) can be sent here.
+* **WAV Generate / WAV Read / Codeword / User Bits / Calculator / Reference** — the LTC Explorer tools below.
+
+The code is played at the output's own mix rate so Windows never resamples it. To test without cables, run the generator on an output and the reader on *Loopback* of the same output.
+
+```
+dotnet build apps/LtcStudio -c Debug        # or Release; runs from apps/LtcStudio/bin/<cfg>/net10.0-windows10.0.19041.0/win-x64/LtcStudio.exe
+./publish.ps1                               # Release win-x64 → folder, portable zip and setup.exe in artifacts/
+./publish.ps1 -Configuration Debug -Runtime win-arm64
+./publish.ps1 -NoInstaller                  # folder + zip only
+./publish.ps1 -InstallInno                  # installs Inno Setup 6 via winget if missing
+publish.cmd                                 # same, double-clickable
+```
+
+`artifacts/LtcStudio-<ver>-win-x64-setup.exe` (Inno Setup 6, `installer/LtcStudio.iss`) installs per user without admin (or for all users if chosen), adds Start menu and optional desktop shortcuts, can put `ltc` on PATH, and uninstalls from Settings → Apps. Silent: `setup.exe /VERYSILENT /CURRENTUSER`.
+
+The published folder also contains `ltc.exe` (single-file, self-contained). Settings (devices, channels, level, rate) are remembered per user.
+
 ## LTC Explorer (MAUI)
 
 * **Generate** — every generator and codeword option (rate, start or time-of-day, user bits as hex or text, all eight BGF combinations, color frame, polarity correction, sample rate, WAV format, level, rise time, speed, invert, reverse), a live waveform of the first codeword with its bit cells, and Save WAV.
@@ -131,7 +155,7 @@ On Windows, generated files go to `Documents\LtcExplorer`; on other platforms th
 ## Build
 
 ```
-./build.ps1                     # Debug and Release: library, CLI, tests (and the MAUI app on Windows)
+./build.ps1                     # Debug and Release: library, CLI, tests (and LTC Studio + LTC Explorer on Windows)
 ./build.ps1 -Configuration Release -SkipApp
 
 dotnet test tests/LinearTimecode.Tests -c Release
