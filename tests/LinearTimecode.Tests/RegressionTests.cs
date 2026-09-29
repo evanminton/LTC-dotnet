@@ -315,4 +315,136 @@ public class RegressionTests
         Assert.True(LtcDescriber.TryExplain("01:00:00:00", LtcFrameRate.Fps25, out string? text, out _));
         Assert.Contains("01:00:00:00", text);
     }
+
+    // ---------------------------------------------------------------- full review, 2026-09-29
+
+    [Theory]
+    [InlineData(LtcFrameRate.Fps25, 1.15)]
+    [InlineData(LtcFrameRate.Fps25, 1.2)]
+    [InlineData(LtcFrameRate.Fps30, 0.8)]
+    [InlineData(LtcFrameRate.Fps24, 1.2)]
+    public void RateDetectionUsesTheFrameCountAtVarispeed(LtcFrameRate rate, double speed)
+    {
+        // Start just before a second rolls over, so the count is known almost at once.
+        var start = new LtcFrame(new Timecode(1, 0, 0, rate.FramesPerSecond() - 3, rate)) { BinaryGroupFlags = BinaryGroupFlags.ClockTimeDateTimeZone };
+        var gen = new LtcGenerator(start, 48_000) { Speed = speed };
+        float[] audio = gen.Read((int)(LtcGenerator.SamplesFor(3 * rate.FramesPerSecond(), rate, 48_000) / speed));
+        var decoder = new LtcDecoder(48_000);
+        var frames = decoder.Process(audio);
+        // Every frame after the rollover is read with the right layout, so its flags are right.
+        var after = frames.SkipWhile(f => f.Timecode.Seconds == 0).ToList();
+        Assert.True(after.Count > 2 * rate.FramesPerSecond());
+        Assert.All(after, f => Assert.Equal(rate.Base(), f.Frame.Rate.Base()));
+        Assert.All(after, f => Assert.Equal(BinaryGroupFlags.ClockTimeDateTimeZone, f.Frame.BinaryGroupFlags));
+        Assert.Equal(rate.Base(), decoder.DetectedRate!.Value.Base());
+    }
+
+    [Fact]
+    public void DropFrameMinuteRolloverGivesThirtyFrames()
+    {
+        var rate = LtcFrameRate.Fps29_97Drop;
+        var gen = new LtcGenerator(new LtcFrame(Timecode.Parse("00:00:59;27", rate)), 48_000) { Speed = 0.8 };
+        float[] audio = gen.Read((int)(LtcGenerator.SamplesFor(10, rate, 48_000) / 0.8));
+        var frames = LtcDecoder.DecodeAll(audio, 48_000);
+        Assert.Contains(frames, f => f.Timecode.ToString() == "00:01:00;02");
+        Assert.Equal(rate, frames[^1].Frame.Rate);
+    }
+
+    [Theory]
+    [InlineData("0000000000000001")]
+    [InlineData("0000000000000000")]
+    [InlineData("0000000000000000000000000000000000000000000000000000000000000000")]
+    public void TryExplainReadsDigitOnlyCodewordsAsCodewords(string input)
+    {
+        var cw = LtcCodeword.Parse(input);
+        Assert.True(LtcDescriber.TryExplain(input, LtcFrameRate.Fps30, out string? text, out _));
+        Assert.Equal(LtcDescriber.Explain(cw, LtcFrameRate.Fps30), text);
+        Assert.True(LtcDescriber.TryExplain("10", LtcFrameRate.Fps30, out text, out _)); // a bare frame number is still a time code
+        Assert.StartsWith("Time code      00:00:00:10", text);
+    }
+
+    [Fact]
+    public void BcdErrorCodewordRoundTrips()
+    {
+        var cw = new LtcCodeword(0).WithBits(LtcBits.FrameUnits, 4, 12).WithBits(LtcBits.FrameTens, 2, 1)
+            .WithBits(LtcBits.HourUnits, 4, 15).WithPolarityCorrection(TimecodeBase.Base30);
+        var frame = LtcFrame.FromCodeword(cw, LtcFrameRate.Fps30);
+        Assert.True(frame.BcdError);
+        Assert.Equal(cw, frame.ToCodeword());
+        Assert.Equal(cw, (frame with { UserBits = new UserBits(0x12345678) }).ToCodeword().WithBits(4, 4, 0).WithBits(12, 4, 0)
+            .WithBits(20, 4, 0).WithBits(28, 4, 0).WithBits(36, 4, 0).WithBits(44, 4, 0).WithBits(52, 4, 0).WithBits(60, 4, 0)
+            .WithPolarityCorrection(TimecodeBase.Base30));
+        // A new address is encoded normally.
+        var moved = frame with { Timecode = new Timecode(1, 0, 0, 0) };
+        Assert.Equal(new Timecode(1, 0, 0, 0), LtcFrame.FromCodeword(moved.ToCodeword(), LtcFrameRate.Fps30).Timecode);
+    }
+
+    [Theory]
+    [InlineData(45, 0, 0, 0)]
+    [InlineData(0, 80, 0, 0)]
+    [InlineData(0, 0, 80, 0)]
+    [InlineData(0, 0, 0, 40)]
+    [InlineData(-1, 0, 0, 0)]
+    public void ToCodewordRejectsFieldsThatDontFitTheirDigits(int h, int m, int s, int f)
+    {
+        var frame = new LtcFrame(Timecode.CreateUnchecked(h, m, s, f, LtcFrameRate.Fps25));
+        Assert.Throws<ArgumentOutOfRangeException>(() => frame.ToCodeword());
+        Assert.Throws<ArgumentOutOfRangeException>(() => new AuxiliaryTimeAddress(Timecode.CreateUnchecked(h, m, s, f, LtcFrameRate.Fps25)).ToUserBits());
+    }
+
+    [Fact]
+    public void OutOfRangeButEncodableAddressesStillEncode()
+    {
+        // Hour 25 fits the digits; it is written as is and reported by Validate.
+        var frame = new LtcFrame(Timecode.CreateUnchecked(25, 0, 0, 0, LtcFrameRate.Fps25));
+        var back = LtcFrame.FromCodeword(frame.ToCodeword(), LtcFrameRate.Fps25);
+        Assert.Equal(25, back.Timecode.Hours);
+        Assert.NotEmpty(back.Validate());
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(9)]
+    [InlineData(-1)]
+    public void UserBitsIndexerRejectsBadGroups(int group) =>
+        Assert.Throws<ArgumentOutOfRangeException>(() => new UserBits(0x80000000)[group]);
+
+    [Fact]
+    public void DefaultTimecodeIsThirtyFps()
+    {
+        Assert.Equal(LtcFrameRate.Fps30, default(Timecode).Rate);
+        Assert.Equal(new Timecode(0, 0, 0, 0), default);
+        foreach (var rate in LtcFrameRateExtensions.All) Assert.Equal(rate, new Timecode(1, 2, 3, 4, rate).Rate);
+    }
+
+    [Fact]
+    public void CompareOrdersByRealTimeAcrossRates()
+    {
+        var a = new Timecode(1, 0, 0, 0, LtcFrameRate.Fps25);
+        Assert.Equal(0, a.CompareTo(new Timecode(1, 0, 0, 0, LtcFrameRate.Fps30)));
+        Assert.NotEqual(a, new Timecode(1, 0, 0, 0, LtcFrameRate.Fps30));
+        Assert.True(new Timecode(0, 50, 0, 0, LtcFrameRate.Fps30) < a); // earlier in real time, though a larger address count
+        // NTSC time runs slow: 01:00:00:00 NDF at 29.97 is later than 01:00:00:00 at 30.
+        Assert.True(new Timecode(1, 0, 0, 0, LtcFrameRate.Fps29_97) > new Timecode(1, 0, 0, 0, LtcFrameRate.Fps30));
+        // Same instant, different counting.
+        var df = Timecode.Parse("00:10:00;00", LtcFrameRate.Fps29_97Drop);
+        Assert.Equal(0, df.CompareTo(Timecode.FromTotalFrames(df.TotalFrames, LtcFrameRate.Fps29_97)));
+        Assert.True(new Timecode(0, 0, 0, 1, LtcFrameRate.Fps24) > new Timecode(0, 0, 0, 1, LtcFrameRate.Fps25));
+    }
+
+    [Fact]
+    public void CenturyPivotIsPerValue()
+    {
+        var ub = new DateTimeZone(new DateOnly(2065, 3, 4), TimeZoneCode.Utc).ToUserBits();
+        Assert.Equal(new DateOnly(2065, 3, 4), DateTimeZone.FromUserBits(ub).Date);
+        var old = DateTimeZone.FromUserBits(ub, centuryPivot: 60);
+        Assert.Equal(new DateOnly(1965, 3, 4), old.Date);
+        Assert.Equal(60, old.CenturyPivot);
+        Assert.Equal(ub, old.ToUserBits());
+        Assert.Equal(60, old.AddDays(1).CenturyPivot);
+        // Other values keep their own pivot.
+        Assert.Equal(DateTimeZone.DefaultCenturyPivot, new DateTimeZone(new DateOnly(2065, 1, 1), TimeZoneCode.Utc).CenturyPivot);
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DateTimeZone(new DateOnly(2075, 1, 1), TimeZoneCode.Utc, centuryPivot: 60));
+        Assert.Throws<ArgumentOutOfRangeException>(() => DateTimeZone.FromUserBits(ub, centuryPivot: 100));
+    }
 }

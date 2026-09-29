@@ -124,7 +124,7 @@ public class LiveReaderPage : ContentPage
                     Ui.Button("Explain frame bit by bit", (_, _) => _explain.Text = _latest is { } f ? LtcDescriber.Explain(f.Frame) : "No frame decoded yet."),
                     Ui.Button("Copy time code", async (_, _) =>
                     {
-                        if (_latest is { } f) { await Clipboard.Default.SetTextAsync(f.Timecode.ToString()); Status($"Copied {f.Timecode}."); }
+                        if (_latest is { } f && await CopyAsync(f.Timecode.ToString())) Status($"Copied {f.Timecode}.");
                     }),
                     Ui.Button("Hide explanation", (_, _) => _explain.Text = ""),
                 },
@@ -138,7 +138,7 @@ public class LiveReaderPage : ContentPage
                 Children =
                 {
                     Ui.Button("Clear events", (_, _) => { _logLines.Clear(); _logDirty = true; }),
-                    Ui.Button("Copy events", async (_, _) => await Clipboard.Default.SetTextAsync(string.Join(Environment.NewLine, _logLines))),
+                    Ui.Button("Copy events", async (_, _) => { if (await CopyAsync(string.Join(Environment.NewLine, _logLines))) Status("Copied the events."); }),
                 },
             },
             _log);
@@ -158,9 +158,27 @@ public class LiveReaderPage : ContentPage
         _reader.Stop();
     }
 
+    // The clipboard can be held by another process; report that instead of crashing (these run from async void handlers).
+    private async Task<bool> CopyAsync(string text)
+    {
+        try
+        {
+            await Clipboard.Default.SetTextAsync(text);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Status($"Could not copy to the clipboard: {ex.Message}");
+            return false;
+        }
+    }
+
     private void UpdateMinLevelText() => _minLevelText.Text = string.Create(CultureInfo.InvariantCulture, $"{_minLevel.Value:0} dBFS");
 
     private void Status(string text) => _status.Text = text;
+
+    private int _startsPending;       // StartAsync calls still opening a device
+    private string? _requestedDevice; // endpoint of the latest start request
 
     private async Task RefreshDevicesAsync()
     {
@@ -197,7 +215,8 @@ public class LiveReaderPage : ContentPage
         Settings.Set("reader.device", ep.Id);
         _channel.ItemsSource = Enumerable.Range(1, ep.Channels).Select(c => c switch { 1 => "1 (left)", 2 => "2 (right)", _ => c.ToString(CultureInfo.InvariantCulture) }).ToList();
         _channel.SelectedIndex = Math.Clamp(Settings.Get("reader.channel", 0), 0, ep.Channels - 1);
-        if (_reader.IsRunning) await StartAsync(); // follow the new device
+        // Follow a different device; refreshing the list re-selects the same one, which needs no restart.
+        if ((_reader.IsRunning || _startsPending > 0) && Key(ep) != _requestedDevice) await StartAsync();
     }
 
     private async Task ToggleAsync()
@@ -211,12 +230,17 @@ public class LiveReaderPage : ContentPage
         var ep = SelectedEndpoint;
         if (ep is null) { Status("Choose an input first."); return; }
         int channel = Math.Max(0, _channel.SelectedIndex);
+        _requestedDevice = Key(ep);
         _start.IsEnabled = false;
+        _startsPending++;
         try
         {
             _reader.Rate = Ui.SelectedRate(_rate, withAuto: true);
             _reader.MinimumLevel = Math.Pow(10, _minLevel.Value / 20);
             if (!await _reader.StartAsync(ep, channel)) return; // superseded by a later start or stop
+            // A channel picked while the device was opening was overwritten by the start; apply it now.
+            channel = Math.Max(0, _channel.SelectedIndex);
+            _reader.Channel = channel;
             ClearStats();
             _start.Text = "Stop";
             Status($"Reading {ep.DisplayName}, channel {channel + 1} ({_reader.FormatDescription}).");
@@ -229,9 +253,13 @@ public class LiveReaderPage : ContentPage
         }
         finally
         {
+            _startsPending--;
             _start.IsEnabled = true;
         }
     }
+
+    // An input and the loopback of the output with the same id are different sources.
+    private static string Key(AudioEndpoint ep) => $"{ep.Id}|{ep.IsLoopback}";
 
     private void ClearStats()
     {

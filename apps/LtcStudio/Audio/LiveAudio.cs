@@ -211,11 +211,21 @@ public sealed class LiveReader : IDisposable
     private void OnStopped(object? sender, StoppedEventArgs e)
     {
         if (e.Exception is null) return; // our own Stop() raises Stopped
+        WasapiCapture? capture;
+        MMDevice? device;
         lock (_lock)
         {
-            _capture?.Dispose(); _device?.Dispose();
-            _capture = null; _device = null; _decoder = null;
+            // A late error from a device that a restart has already replaced must not close the new one.
+            if (!ReferenceEquals(sender, _capture)) return;
+            capture = _capture; device = _device;
+            _capture = null; _device = null;
+            if (_decoder is not null) _decoder.FrameDecoded -= OnFrame;
+            _decoder = null;
         }
+        capture!.DataAvailable -= OnData;
+        capture.RecordingStopped -= OnStopped;
+        capture.Dispose();
+        device?.Dispose();
         Stopped?.Invoke(e.Exception.Message);
     }
 
@@ -383,11 +393,24 @@ public sealed class LiveGenerator : IDisposable
     private void OnStopped(object? sender, StoppedEventArgs e)
     {
         if (e.Exception is null) return;
+        WasapiOut? output;
+        MMDevice? device;
         lock (_lock)
         {
-            _out?.Dispose(); _device?.Dispose();
+            // A late error from a device that a restart has already replaced must not close the new one.
+            if (!ReferenceEquals(sender, _out)) return;
+            output = _out; device = _device;
             _out = null; _device = null; _generator = null;
         }
+        output!.PlaybackStopped -= OnStopped;
+        // This runs on WasapiOut's playback thread (it has no SynchronizationContext), and after an error that thread
+        // never marks itself stopped, so disposing here would Join the thread from itself and hang. Dispose once the
+        // playback thread has returned.
+        Task.Run(() =>
+        {
+            output.Dispose();
+            device?.Dispose();
+        });
         Stopped?.Invoke(e.Exception.Message);
     }
 

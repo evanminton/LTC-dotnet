@@ -16,13 +16,15 @@ public readonly record struct UserBits(uint Value)
     public static UserBits Empty => default;
 
     /// <summary>Binary group 1–8 (0–15).</summary>
-    public int this[int group] => (int)((Value >> ((group - 1) * 4)) & 0xF);
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="group"/> is not 1–8.</exception>
+    public int this[int group] => Group(group);
 
     /// <summary>Gets binary group 1–8.</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="group"/> is not 1–8.</exception>
     public int Group(int group)
     {
         if (group is < 1 or > 8) throw new ArgumentOutOfRangeException(nameof(group), "Binary groups are numbered 1–8.");
-        return this[group];
+        return (int)((Value >> ((group - 1) * 4)) & 0xF);
     }
 
     /// <summary>Returns a copy with binary group 1–8 set.</summary>

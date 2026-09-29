@@ -30,17 +30,41 @@ public sealed record DateTimeZone
     /// <summary>MJD 0 is 17 November 1858.</summary>
     public static readonly DateOnly MjdEpoch = new(1858, 11, 17);
 
-    /// <summary>Two-digit years at or above this pivot are read as 19xx, below as 20xx. Default 70.</summary>
-    public static int CenturyPivot { get; set; } = 70;
+    /// <summary>The default <see cref="CenturyPivot"/>: two-digit years 70–99 are 1970–1999, 00–69 are 2000–2069.</summary>
+    public const int DefaultCenturyPivot = 70;
 
     /// <summary>Creates a value from its parts.</summary>
-    public DateTimeZone(DateOnly date, TimeZoneCode timeZone, DateFormat format = DateFormat.Yymmdd, bool daylightSaving = false)
+    /// <param name="date">The date.</param>
+    /// <param name="timeZone">Time zone code.</param>
+    /// <param name="format">YYMMDD or MJD.</param>
+    /// <param name="daylightSaving">DST flag.</param>
+    /// <param name="centuryPivot">YYMMDD only: which century a two-digit year is in (see <see cref="CenturyPivot"/>).</param>
+    public DateTimeZone(DateOnly date, TimeZoneCode timeZone, DateFormat format = DateFormat.Yymmdd, bool daylightSaving = false, int centuryPivot = DefaultCenturyPivot)
     {
-        if (RangeError(date, format) is { } error) throw new ArgumentOutOfRangeException(nameof(date), error);
+        CheckPivot(centuryPivot);
+        if (RangeError(date, format, centuryPivot) is { } error) throw new ArgumentOutOfRangeException(nameof(date), error);
         Date = date;
         TimeZone = timeZone;
         Format = format;
         DaylightSaving = daylightSaving;
+        _centuryPivot = centuryPivot;
+    }
+
+    /// <summary>
+    /// YYMMDD only: two-digit years at or above this pivot (0–99) are 19xx, below it 20xx, so the format covers
+    /// 1900 + pivot to 1999 + pivot. Default <see cref="DefaultCenturyPivot"/> (70). A property of this value, so
+    /// readers with different conventions don't affect each other.
+    /// </summary>
+    public int CenturyPivot
+    {
+        get => _centuryPivot;
+        init { CheckPivot(value); _centuryPivot = value; }
+    }
+    private readonly int _centuryPivot = DefaultCenturyPivot;
+
+    private static void CheckPivot(int pivot)
+    {
+        if (pivot is < 0 or > 99) throw new ArgumentOutOfRangeException(nameof(CenturyPivot), "The century pivot is a two-digit year, 0–99.");
     }
 
     /// <summary>The date. For YYMMDD it is the local date; for MJD it is the UTC date.</summary>
@@ -62,10 +86,10 @@ public sealed record DateTimeZone
     public bool TimeAddressIsUtc => Format == DateFormat.ModifiedJulianDate;
 
     // Why the date can't be written in the format, or null.
-    private static string? RangeError(DateOnly date, DateFormat format) => format switch
+    private static string? RangeError(DateOnly date, DateFormat format, int centuryPivot) => format switch
     {
-        DateFormat.Yymmdd when date.Year < 1900 + CenturyPivot || date.Year > 1999 + CenturyPivot =>
-            $"YYMMDD covers {1900 + CenturyPivot}–{1999 + CenturyPivot} with the current century pivot; use the MJD format for other years.",
+        DateFormat.Yymmdd when date.Year < 1900 + centuryPivot || date.Year > 1999 + centuryPivot =>
+            $"YYMMDD covers {1900 + centuryPivot}–{1999 + centuryPivot} with century pivot {centuryPivot}; use the MJD format for other years.",
         DateFormat.ModifiedJulianDate when date < MjdEpoch || ToMjd(date) > 999_999 => "Date is outside the 6-digit MJD range.",
         _ => null,
     };
@@ -77,11 +101,11 @@ public sealed record DateTimeZone
     /// Builds the ST 309 value for an instant: YYMMDD carries the local date (time address = local time),
     /// MJD carries the UTC date (time address = UTC).
     /// </summary>
-    public static DateTimeZone ForInstant(DateTimeOffset instant, DateFormat format = DateFormat.Yymmdd, bool daylightSaving = false)
+    public static DateTimeZone ForInstant(DateTimeOffset instant, DateFormat format = DateFormat.Yymmdd, bool daylightSaving = false, int centuryPivot = DefaultCenturyPivot)
     {
         var tz = TimeZoneCode.FromOffset(instant.Offset) ?? throw new ArgumentException($"ST 309 has no time zone code for offset {instant.Offset}.", nameof(instant));
         var date = format == DateFormat.ModifiedJulianDate ? DateOnly.FromDateTime(instant.UtcDateTime) : DateOnly.FromDateTime(instant.DateTime);
-        return new DateTimeZone(date, tz, format, daylightSaving);
+        return new DateTimeZone(date, tz, format, daylightSaving, centuryPivot);
     }
 
     /// <summary>
@@ -90,7 +114,7 @@ public sealed record DateTimeZone
     /// </summary>
     public UserBits ToUserBits()
     {
-        if (RangeError(Date, Format) is { } error) throw new InvalidOperationException(error);
+        if (RangeError(Date, Format, CenturyPivot) is { } error) throw new InvalidOperationException(error);
         int[] digits = Format == DateFormat.Yymmdd
             ? [Date.Day % 10, Date.Day / 10, Date.Month % 10, Date.Month / 10, Date.Year % 10, Date.Year / 10 % 10]
             : [.. Enumerable.Range(0, 6).Select(i => Mjd / (int)Math.Pow(10, i) % 10)];
@@ -101,15 +125,22 @@ public sealed record DateTimeZone
     }
 
     /// <summary>Decodes user bits; throws <see cref="FormatException"/> when the digits are not a valid date.</summary>
-    public static DateTimeZone FromUserBits(UserBits bits) =>
-        TryFromUserBits(bits, out var v, out string? error) ? v! : throw new FormatException(error);
+    /// <param name="bits">The user bits.</param>
+    /// <param name="centuryPivot">YYMMDD only: which century a two-digit year is in (see <see cref="CenturyPivot"/>).</param>
+    public static DateTimeZone FromUserBits(UserBits bits, int centuryPivot = DefaultCenturyPivot) =>
+        TryFromUserBits(bits, out var v, out string? error, centuryPivot) ? v! : throw new FormatException(error);
 
-    /// <summary>Tries to decode user bits as ST 309.</summary>
+    /// <summary>Tries to decode user bits as ST 309 (default century pivot).</summary>
     public static bool TryFromUserBits(UserBits bits, out DateTimeZone? value) => TryFromUserBits(bits, out value, out _);
 
     /// <summary>Tries to decode user bits as ST 309, returning why not.</summary>
-    public static bool TryFromUserBits(UserBits bits, out DateTimeZone? value, out string? error)
+    /// <param name="bits">The user bits.</param>
+    /// <param name="value">The decoded value.</param>
+    /// <param name="error">Why the bits are not a valid ST 309 date.</param>
+    /// <param name="centuryPivot">YYMMDD only: which century a two-digit year is in (see <see cref="CenturyPivot"/>).</param>
+    public static bool TryFromUserBits(UserBits bits, out DateTimeZone? value, out string? error, int centuryPivot = DefaultCenturyPivot)
     {
+        CheckPivot(centuryPivot);
         value = null;
         error = null;
         var tz = new TimeZoneCode(bits[7] | ((bits[8] & 3) << 4));
@@ -129,13 +160,13 @@ public sealed record DateTimeZone
         }
 
         int day = bits[2] * 10 + bits[1], month = bits[4] * 10 + bits[3], yy = bits[6] * 10 + bits[5];
-        int year = yy >= CenturyPivot ? 1900 + yy : 2000 + yy;
+        int year = yy >= centuryPivot ? 1900 + yy : 2000 + yy;
         if (month is < 1 or > 12 || day < 1 || day > DateTime.DaysInMonth(year, month))
         {
             error = $"{yy:00}-{month:00}-{day:00} (YYMMDD) is not a valid date.";
             return false;
         }
-        value = new DateTimeZone(new DateOnly(year, month, day), tz, DateFormat.Yymmdd, dst);
+        value = new DateTimeZone(new DateOnly(year, month, day), tz, DateFormat.Yymmdd, dst, centuryPivot);
         return true;
     }
 
@@ -159,13 +190,13 @@ public sealed record DateTimeZone
     /// The same value <paramref name="days"/> later/earlier (the §5.4 midnight rollover). Throws
     /// <see cref="ArgumentOutOfRangeException"/> when the result can't be written in <see cref="Format"/>.
     /// </summary>
-    public DateTimeZone AddDays(int days) => new(Date.AddDays(days), TimeZone, Format, DaylightSaving);
+    public DateTimeZone AddDays(int days) => new(Date.AddDays(days), TimeZone, Format, DaylightSaving, CenturyPivot);
 
     /// <summary>Problems with this value against ST 309.</summary>
     public IReadOnlyList<string> Validate()
     {
         var issues = new List<string>();
-        if (RangeError(Date, Format) is { } error) issues.Add(error);
+        if (RangeError(Date, Format, CenturyPivot) is { } error) issues.Add(error);
         switch (TimeZone.Kind)
         {
             case TimeZoneCodeKind.Reserved: issues.Add($"Time zone code {TimeZone.Hex} is reserved and shall not be used."); break;

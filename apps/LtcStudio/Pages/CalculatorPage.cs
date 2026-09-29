@@ -45,7 +45,8 @@ public class CalculatorPage : ContentPage
         sb.AppendLine($"A               {a}  ({rate.DisplayName()} fps)");
         sb.AppendLine($"Address #       {a.TotalFrames} of {rate.AddressesPerDay()} per day");
         if (rate.IsFramePair()) sb.AppendLine($"Video frames    {a.VideoFrameIndex} and {a.VideoFrameIndex + 1}");
-        sb.AppendLine(inv, $"Real time       {a.ToTimeSpan():hh\\:mm\\:ss\\.fffffff}");
+        var real = a.ToTimeSpan(); // can pass 24 h (non-drop NTSC rates), so show whole hours rather than wrap
+        sb.AppendLine(inv, $"Real time       {(int)real.TotalHours:00}:{real:mm\\:ss\\.fffffff}");
         sb.AppendLine($"Next / previous {a.Next()} / {a.Previous()}");
         sb.AppendLine($"Color framing   {ColorFraming.Describe(a)}");
 

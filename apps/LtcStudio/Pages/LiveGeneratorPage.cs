@@ -41,6 +41,7 @@ public class LiveGeneratorPage : ContentPage
     private IReadOnlyList<PageLineFrame>? _messageFrames;
     private AuxiliaryTimeAddress? _runningAux;
     private int _seenUserBits;
+    private UserBits? _appliedUserBits; // the user bits last pushed into the generator from this page
 
     // Signal
     private readonly Slider _level = new(-40, 0, -12);
@@ -71,6 +72,11 @@ public class LiveGeneratorPage : ContentPage
     private DateTime _startedAt;
     private int _driftChecks;
     private long _lastClockCheck;
+    private int _startsPending;      // StartAsync calls still opening a device
+    private string? _requestedDevice; // endpoint of the latest start request
+
+    // True while playing or while a start is opening a device, so setting changes made meanwhile still restart.
+    private bool Active => _gen.IsRunning || _startsPending > 0;
 
     public LiveGeneratorPage()
     {
@@ -97,7 +103,7 @@ public class LiveGeneratorPage : ContentPage
         _rate.SelectedIndexChanged += async (_, _) =>
         {
             Settings.Set("gen.rate", _rate.SelectedIndex);
-            if (_gen.IsRunning) { Log("Frame rate changed — restarting the generator."); await StartAsync(); }
+            if (Active) { Log("Frame rate changed — restarting the generator."); await StartAsync(); }
         };
         _startTc.TextChanged += (_, _) => Settings.Set("gen.start", _startTc.Text ?? "");
         _latency.TextChanged += (_, _) => Settings.Set("gen.latency", _latency.Text ?? "40");
@@ -139,7 +145,7 @@ public class LiveGeneratorPage : ContentPage
             Ui.Field("Source", _mode),
             Ui.Field("Start", _startTc, "HH:MM:SS:FF — use ';' before the frames for drop-frame."),
             Ui.Field("Frame rate", _rate, "Sets the bit rate (80 × codewords/s) and the flag layout. Changing it restarts the output."),
-            Ui.Field("Follow the PC clock", _followClock, "Time of day only: re-jam when the code drifts two frames or more from the PC clock (sound-card clocks are not the PC clock)."),
+            Ui.Field("Follow the PC clock", _followClock, "Time of day only: re-jam when the code drifts two frames or more from the PC clock (sound-card clocks are not the PC clock). At 23.98, 29.97 NDF, 47.95 and 59.94 NDF the count itself runs 3.6 s an hour slow, so this re-jams about every minute; use drop-frame or turn it off."),
             Ui.Field("Locate", new HorizontalStackLayout
             {
                 Spacing = 8,
@@ -275,7 +281,8 @@ public class LiveGeneratorPage : ContentPage
         _channels = OutputChannel.For(ep.Channels);
         _channel.ItemsSource = _channels.Select(c => c.Name).ToList();
         _channel.SelectedIndex = Math.Clamp(Settings.Get("gen.channel", 0), 0, _channels.Count - 1);
-        if (_gen.IsRunning) await StartAsync();
+        // Refreshing the list re-selects the same device; only a different device needs a restart.
+        if (Active && ep.Id != _requestedDevice) await StartAsync();
     }
 
     // ---------- transport ----------
@@ -306,7 +313,11 @@ public class LiveGeneratorPage : ContentPage
         int channel = _channel.SelectedIndex >= 0 && _channel.SelectedIndex < _channels.Count ? _channels[_channel.SelectedIndex].Channel : -1;
         int latencyMs = LatencyMs;
         bool timeOfDay = TimeOfDay;
+        // Read the controls here: the generator is created on a background thread.
+        var configure = CaptureSettings(content);
+        _requestedDevice = ep.Id;
         _start.IsEnabled = false;
+        _startsPending++;
         try
         {
             bool started = await _gen.StartAsync(ep, channel, latencyMs, (sampleRate, latency) =>
@@ -314,10 +325,14 @@ public class LiveGeneratorPage : ContentPage
                 // Time of day: the first sample reaches the output one buffer from now.
                 var first = content with { Timecode = timeOfDay ? ClockTimecode(content, rate, latency) : start };
                 var g = new LtcGenerator(first, sampleRate);
-                Configure(g, first);
+                configure(g);
                 return g;
             });
             if (!started) return; // superseded by a later start or stop
+            _appliedUserBits = content.UserBits;
+            // Edits made while the device was opening (content, signal, channel) went nowhere; apply them now.
+            if (_channel.SelectedIndex >= 0 && _channel.SelectedIndex < _channels.Count) _gen.Channel = _channels[_channel.SelectedIndex].Channel;
+            ApplyLive();
             _startedAt = DateTime.Now;
             _driftChecks = 0;
             _start.Text = "Stop";
@@ -331,6 +346,7 @@ public class LiveGeneratorPage : ContentPage
         }
         finally
         {
+            _startsPending--;
             _start.IsEnabled = true;
         }
     }
@@ -354,7 +370,7 @@ public class LiveGeneratorPage : ContentPage
             // NextFrame starts after the codeword now being written; aim it at the clock one codeword + one buffer ahead.
             var next = g.NextFrame;
             var tc = ClockTimecode(next, next.Rate, latency + next.Rate.CodewordDuration());
-            g.NextFrame = next with { Timecode = tc };
+            g.NextFrame = WithDateAcrossMidnight(next, tc);
         });
         _driftChecks = 0;
         Log($"{reason}.");
@@ -392,19 +408,38 @@ public class LiveGeneratorPage : ContentPage
         return Timecode.FromTimeOfDay(time, rate);
     }
 
-    private void Configure(LtcGenerator g, LtcFrame content)
+    // Moves to address tc, stepping an ST 309 date when the jump crosses midnight (ST 309 §5.4), as the generator
+    // itself does when it counts through 00:00:00:00.
+    private static LtcFrame WithDateAcrossMidnight(LtcFrame next, Timecode tc)
+    {
+        long perDay = next.Rate.AddressesPerDay();
+        long diff = (long)tc.TotalFrames - next.Timecode.TotalFrames;
+        var moved = next with { Timecode = tc };
+        return diff < -perDay / 2 ? moved.RollDate(1) : diff > perDay / 2 ? moved.RollDate(-1) : moved;
+    }
+
+    // Reads the signal settings from the controls (UI thread) and returns an action that applies them to a generator.
+    private Action<LtcGenerator> CaptureSettings(LtcFrame content)
     {
         double rise = double.TryParse(_rise.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double r) ? Math.Clamp(r, 0, 1000) : 40;
         var frames = _messageFrames;
         var aux = _runningAux;
-        g.FrameHook = aux is not null ? AuxiliaryTimeAddress.RunningHook(aux, content.BinaryGroupFlags == BinaryGroupFlags.ClockTimePageLine)
+        var hook = aux is not null ? AuxiliaryTimeAddress.RunningHook(aux, content.BinaryGroupFlags == BinaryGroupFlags.ClockTimePageLine)
             : frames is null ? null
-            : (i, f) => f.WithPageLine(frames[(int)(i % frames.Count)], f.BinaryGroupFlags == BinaryGroupFlags.ClockTimePageLine);
-        g.Amplitude = (float)Math.Pow(10, _level.Value / 20);
-        g.RiseTime = TimeSpan.FromTicks((long)Math.Round(rise * 10));
-        g.Invert = _invert.IsToggled;
-        g.Reverse = _reverse.IsToggled;
-        if (Math.Abs(g.Speed - _speed.Value) > 1e-9) g.Speed = _speed.Value;
+            : (Func<long, LtcFrame, LtcFrame>)((i, f) => f.WithPageLine(frames[(int)(i % frames.Count)], f.BinaryGroupFlags == BinaryGroupFlags.ClockTimePageLine));
+        float amplitude = (float)Math.Pow(10, _level.Value / 20);
+        var riseTime = TimeSpan.FromTicks((long)Math.Round(rise * 10));
+        bool invert = _invert.IsToggled, reverse = _reverse.IsToggled;
+        double speed = _speed.Value;
+        return g =>
+        {
+            g.FrameHook = hook;
+            g.Amplitude = amplitude;
+            g.RiseTime = riseTime;
+            g.Invert = invert;
+            g.Reverse = reverse;
+            if (Math.Abs(g.Speed - speed) > 1e-9) g.Speed = speed;
+        };
     }
 
     // Pushes the current settings into the running generator (from the next codeword on).
@@ -417,12 +452,22 @@ public class LiveGeneratorPage : ContentPage
         if (!TryBuildFrame(out var content, out string? error)) { Status(error!); return; }
         var notes = new LtcFrame(Timecode.Zero(Rate)) { BinaryGroupFlags = content.BinaryGroupFlags, UserBits = content.UserBits }.Validate();
         Status(notes.Count > 0 ? string.Join("\n", notes) : _gen.IsRunning ? "Settings applied." : "");
+        var configure = CaptureSettings(content);
+        // The user bits typed here still hold the date that was sent; once the generator has rolled it at midnight
+        // (ST 309 §5.4), keep the generator's date unless the user bits themselves were edited.
+        bool keepDate = content.UserBits == _appliedUserBits && content.BinaryGroupFlags.CarriesDateTimeZone();
+        _appliedUserBits = content.UserBits;
         _gen.Use(g =>
         {
             // Configure first: a Reverse change re-steps the next frame from the one playing, which it can only do
             // while NextFrame hasn't been set for this codeword. Then keep that address and apply the new content.
-            Configure(g, content);
-            g.NextFrame = content with { Timecode = g.NextFrame.Timecode };
+            configure(g);
+            var next = g.NextFrame;
+            g.NextFrame = content with
+            {
+                Timecode = next.Timecode,
+                UserBits = keepDate && next.BinaryGroupFlags.CarriesDateTimeZone() ? next.UserBits : content.UserBits,
+            };
         });
     }
 
@@ -455,7 +500,8 @@ public class LiveGeneratorPage : ContentPage
 
         var sb = new StringBuilder();
         sb.AppendLine($"Output       {_gen.FormatDescription}, {(_gen.Channel < 0 ? "all channels" : $"channel {_gen.Channel + 1}")}, latency {_gen.Latency.TotalMilliseconds:0} ms");
-        sb.AppendLine($"Running for  {DateTime.Now - _startedAt:hh\\:mm\\:ss}");
+        var running = DateTime.Now - _startedAt;
+        sb.AppendLine($"Running for  {(int)running.TotalHours:00}:{running:mm\\:ss}");
         sb.AppendLine($"Frame        {current}");
         sb.AppendLine($"Meaning      {UserBitsDescriber.Summary(current.UserBits, current.BinaryGroupFlags, current.Rate)}");
         sb.AppendLine($"Codeword     {current.ToCodeword().ToHex()}");

@@ -43,25 +43,54 @@ public sealed record LtcFrame
     /// </summary>
     public bool StrayDropFrameFlag { get; init; }
 
-    /// <summary>Set by <see cref="FromCodeword"/> when a received BCD units digit was above 9.</summary>
+    /// <summary>
+    /// Set by <see cref="FromCodeword"/> when a received BCD units digit was above 9. While <see cref="Timecode"/> is
+    /// unchanged, <see cref="ToCodeword"/> writes the time address bits back exactly as received.
+    /// </summary>
     public bool BcdError { get; init; }
 
     public LtcFrameRate Rate => Timecode.Rate;
 
+    // Time-address bits of a codeword received with a BCD error, and the address they were decoded to. A units digit
+    // above 9 can't be held in Timecode, so while the address is unchanged ToCodeword writes these bits back as received.
+    private ulong _rawAddressBits;
+    private Timecode? _rawAddressTimecode;
+
+    private const ulong AddressMask =
+        (0xFUL << LtcBits.FrameUnits) | (0x3UL << LtcBits.FrameTens) | (0xFUL << LtcBits.SecondUnits) | (0x7UL << LtcBits.SecondTens) |
+        (0xFUL << LtcBits.MinuteUnits) | (0x7UL << LtcBits.MinuteTens) | (0xFUL << LtcBits.HourUnits) | (0x3UL << LtcBits.HourTens);
+
     /// <summary>Encodes into an 80-bit codeword.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// A field of <see cref="Timecode"/> doesn't fit its BCD digits (negative, or tens above 3 for frames and hours,
+    /// above 7 for seconds and minutes). Addresses that fit but are out of range for the rate, such as hour 25, are
+    /// encoded as they are and reported by <see cref="Validate"/>.
+    /// </exception>
     public LtcCodeword ToCodeword()
     {
         var tc = Timecode;
         var b = tc.Rate.Base();
-        var cw = new LtcCodeword(0)
-            .WithBits(LtcBits.FrameUnits, 4, tc.Frames % 10)
-            .WithBits(LtcBits.FrameTens, 2, tc.Frames / 10)
-            .WithBits(LtcBits.SecondUnits, 4, tc.Seconds % 10)
-            .WithBits(LtcBits.SecondTens, 3, tc.Seconds / 10)
-            .WithBits(LtcBits.MinuteUnits, 4, tc.Minutes % 10)
-            .WithBits(LtcBits.MinuteTens, 3, tc.Minutes / 10)
-            .WithBits(LtcBits.HourUnits, 4, tc.Hours % 10)
-            .WithBits(LtcBits.HourTens, 2, tc.Hours / 10);
+        LtcCodeword cw;
+        if (_rawAddressTimecode is { } raw && raw.Equals(tc))
+        {
+            cw = new LtcCodeword(_rawAddressBits & AddressMask);
+        }
+        else
+        {
+            CheckFits(tc.Frames, 39, "frames");
+            CheckFits(tc.Seconds, 79, "seconds");
+            CheckFits(tc.Minutes, 79, "minutes");
+            CheckFits(tc.Hours, 39, "hours");
+            cw = new LtcCodeword(0)
+                .WithBits(LtcBits.FrameUnits, 4, tc.Frames % 10)
+                .WithBits(LtcBits.FrameTens, 2, tc.Frames / 10)
+                .WithBits(LtcBits.SecondUnits, 4, tc.Seconds % 10)
+                .WithBits(LtcBits.SecondTens, 3, tc.Seconds / 10)
+                .WithBits(LtcBits.MinuteUnits, 4, tc.Minutes % 10)
+                .WithBits(LtcBits.MinuteTens, 3, tc.Minutes / 10)
+                .WithBits(LtcBits.HourUnits, 4, tc.Hours % 10)
+                .WithBits(LtcBits.HourTens, 2, tc.Hours / 10);
+        }
 
         for (int g = 1; g <= 8; g++) cw = cw.WithBits(LtcBits.BinaryGroup(g), 4, this.UserBits[g]);
 
@@ -75,6 +104,12 @@ public sealed record LtcFrame
         if (b == TimecodeBase.Base24) cw = cw.WithBit(11, (UnassignedFlagBits & 2) != 0);
 
         return PolarityCorrection ? cw.WithPolarityCorrection(b) : cw.WithBit(LtcBits.PolarityCorrection(b), false);
+    }
+
+    private static void CheckFits(int value, int max, string field)
+    {
+        if (value < 0 || value > max)
+            throw new ArgumentOutOfRangeException(nameof(Timecode), $"{field} = {value} can't be written in the codeword's BCD digits (0–{max}).");
     }
 
     /// <summary>
@@ -95,7 +130,8 @@ public sealed record LtcFrame
         int unassigned = 0;
         if (b != TimecodeBase.Base30 && codeword[10]) unassigned |= 1;
         if (b == TimecodeBase.Base24 && codeword[11]) unassigned |= 2;
-        return new LtcFrame(Timecode.CreateUnchecked(codeword.Hours, codeword.Minutes, codeword.Seconds, codeword.Frames, rate))
+        var tc = Timecode.CreateUnchecked(codeword.Hours, codeword.Minutes, codeword.Seconds, codeword.Frames, rate);
+        return new LtcFrame(tc)
         {
             UserBits = codeword.UserBits,
             BinaryGroupFlags = codeword.GetBinaryGroupFlags(b),
@@ -104,6 +140,8 @@ public sealed record LtcFrame
             UnassignedFlagBits = unassigned,
             StrayDropFrameFlag = strayDf,
             BcdError = !codeword.HasValidBcd,
+            _rawAddressBits = codeword.HasValidBcd ? 0 : codeword.Data & AddressMask,
+            _rawAddressTimecode = codeword.HasValidBcd ? null : tc,
         };
     }
 
