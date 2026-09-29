@@ -48,8 +48,10 @@ public sealed record LtcDecodedFrame(
 /// </para>
 /// <para>
 /// The flag layout depends on the frame count (24/25/30). Pass <c>rate</c> when you know it; otherwise the decoder
-/// infers it from the measured codeword rate, the highest frame number seen and the drop-frame flag
-/// (<see cref="DetectedRate"/>). Frame-pair rates (48/50/60) can't be told from 24/25/30 by the code alone.
+/// infers it from the frame numbers (the last frame before a second rolls over gives the count exactly, whatever
+/// the play speed), the drop-frame flag and the measured codeword rate (<see cref="DetectedRate"/>). Until the first
+/// rollover off-speed code can be read with the wrong layout. Frame-pair rates (48/50/60) can't be told from 24/25/30
+/// by the code alone, nor 29.97 from 30 non-drop when the speed is unknown.
 /// </para>
 /// </remarks>
 public sealed class LtcDecoder
@@ -79,6 +81,9 @@ public sealed class LtcDecoder
     // rate detection
     private double _avgCodewordRate;
     private int _maxFrameSeen = -1;
+    private int _countSeen;           // 24, 25 or 30 once a second rollover has been seen, else 0
+    private LtcCodeword? _prevCodeword; // previous codeword read without a break, for rollover detection
+    private LtcDirection _prevDirection;
     private LtcDecodedFrame? _last;
 
     /// <summary>Creates a decoder.</summary>
@@ -121,7 +126,7 @@ public sealed class LtcDecoder
         _lastRise = _lastFall = double.NaN;
         _lastEdge = double.NaN; _period = 0; _lastLongInterval = 0; _halfPending = false;
         _reg = UInt128.Zero; _validBits = 0; _bitCount = 0;
-        _avgCodewordRate = 0; _maxFrameSeen = -1; _last = null; DetectedRate = null;
+        _avgCodewordRate = 0; _maxFrameSeen = -1; _countSeen = 0; _prevCodeword = null; _last = null; DetectedRate = null;
         SamplePosition = 0;
     }
 
@@ -205,6 +210,8 @@ public sealed class LtcDecoder
             _halfPending = false;
             _validBits = 0;
             _maxFrameSeen = -1; // the source may have changed
+            _countSeen = 0;
+            _prevCodeword = null;
             return;
         }
         _lastLongInterval = 0;
@@ -215,6 +222,7 @@ public sealed class LtcDecoder
             _period = d;
             _halfPending = false;
             _validBits = 0;
+            _prevCodeword = null; // a codeword may be lost here, so the next one doesn't follow on from it
             EmitBit(false, t - d, t, output);
             return;
         }
@@ -271,6 +279,10 @@ public sealed class LtcDecoder
         double cps = duration > 0 ? SampleRate / duration : 0;
         _avgCodewordRate = _avgCodewordRate <= 0 ? cps : _avgCodewordRate + (cps - _avgCodewordRate) * 0.1;
         if (cw.HasValidBcd && cw.Frames < 40) _maxFrameSeen = Math.Max(_maxFrameSeen, cw.Frames);
+        if (_prevCodeword is { } prev && _prevDirection == dir && FrameCountAtRollover(dir == LtcDirection.Forward ? prev : cw, dir == LtcDirection.Forward ? cw : prev) is int count)
+            _countSeen = count;
+        _prevCodeword = cw;
+        _prevDirection = dir;
 
         LtcFrameRate rate = Rate ?? Detect(cw);
         var frame = LtcFrame.FromCodeword(cw, rate);
@@ -288,12 +300,25 @@ public sealed class LtcDecoder
         FrameDecoded?.Invoke(decoded);
     }
 
-    // Guess the rate from the measured codeword rate, the frame numbers seen and the DF flag.
+    // The frame count (24, 25 or 30) when "later" is the codeword after "earlier" across a change of second: the last
+    // frame of a second is count − 1. Drop-frame minutes start at frame 02, and the DF flag only exists at 30 frames.
+    private static int? FrameCountAtRollover(LtcCodeword earlier, LtcCodeword later)
+    {
+        if (!earlier.HasValidBcd || !later.HasValidBcd) return null;
+        if (later.Seconds != (earlier.Seconds + 1) % 60 || earlier.Seconds > 59) return null;
+        bool dropStart = later.Frames == 2 && later.Seconds == 0 && later.DropFrameFlag(TimecodeBase.Base30);
+        if (later.Frames != 0 && !dropStart) return null;
+        return earlier.Frames switch { 23 => 24, 24 => 25, 29 => 30, _ => null };
+    }
+
+    // Guess the rate from the frame count seen at a second rollover, the frame numbers seen, the DF flag and the
+    // measured codeword rate. The frame numbers come first: varispeed changes the measured rate but not the count.
     private LtcFrameRate Detect(LtcCodeword cw)
     {
         double r = _avgCodewordRate;
         TimecodeBase b;
-        if (_maxFrameSeen >= 25) b = TimecodeBase.Base30;
+        if (_countSeen != 0) b = (TimecodeBase)_countSeen;
+        else if (_maxFrameSeen >= 25) b = TimecodeBase.Base30;
         else if (cw.DropFrameFlag(TimecodeBase.Base30) && _maxFrameSeen != 24 && r > 27) b = TimecodeBase.Base30;
         else if (r <= 0) b = TimecodeBase.Base30;
         else if (r < 24.5) b = _maxFrameSeen == 24 ? TimecodeBase.Base25 : TimecodeBase.Base24;

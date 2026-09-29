@@ -24,17 +24,16 @@ public static class LtcDescriber
         text = error = null;
         if (string.IsNullOrWhiteSpace(input)) { error = "Enter a time code, 10 hex bytes or 80 bits."; return false; }
         string s = input.Trim();
+        // Codewords first: 16/20 hex digits or 64/80 bits never form a time code, but digit-only ones would parse as a
+        // frame number ("0000000000000001" is a codeword, not frame 1).
+        LtcCodeword? cw = null;
+        string? cwError = null;
+        try { cw = LtcCodeword.Parse(s); }
+        catch (FormatException ex) { cwError = ex.Message; }
+        if (cw is { } codeword) { text = Explain(codeword, rate); return true; }
         if (Timecode.TryParse(s, rate, out var tc, out string? tcError)) { text = Explain(new LtcFrame(tc)); return true; }
-        try
-        {
-            text = Explain(LtcCodeword.Parse(s), rate);
-            return true;
-        }
-        catch (FormatException ex)
-        {
-            error = s.Contains(':') || s.Contains(';') ? tcError ?? ex.Message : ex.Message;
-            return false;
-        }
+        error = (s.Contains(':') || s.Contains(';') ? tcError ?? cwError : cwError) ?? "Enter a time code, 10 hex bytes or 80 bits.";
+        return false;
     }
 
     /// <summary>Explains a frame and the codeword it encodes to.</summary>

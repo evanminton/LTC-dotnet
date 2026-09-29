@@ -24,15 +24,20 @@ public readonly struct Timecode : IEquatable<Timecode>, IComparable<Timecode>
     /// <exception cref="ArgumentOutOfRangeException">A field is out of range, or the address is skipped by drop-frame counting.</exception>
     public Timecode(int hours, int minutes, int seconds, int frames, LtcFrameRate rate = LtcFrameRate.Fps30)
     {
-        Hours = hours; Minutes = minutes; Seconds = seconds; Frames = frames; Rate = rate;
+        Hours = hours; Minutes = minutes; Seconds = seconds; Frames = frames; _rate = Store(rate);
         string? error = Validate();
         if (error is not null) throw new ArgumentOutOfRangeException(null, error);
     }
 
     private Timecode(int hours, int minutes, int seconds, int frames, LtcFrameRate rate, bool _)
     {
-        Hours = hours; Minutes = minutes; Seconds = seconds; Frames = frames; Rate = rate;
+        Hours = hours; Minutes = minutes; Seconds = seconds; Frames = frames; _rate = Store(rate);
     }
+
+    // The rate is stored relative to 30 fps so that default(Timecode) is 00:00:00:00 at 30 fps, the same default as
+    // the constructor (and the 30-frame system ST 12-1 describes first), rather than enum value 0 (23.98).
+    private readonly int _rate;
+    private static int Store(LtcFrameRate rate) => (int)rate ^ (int)LtcFrameRate.Fps30;
 
     /// <summary>Creates a time address without validating it — used for decoded codewords, which may carry anything.</summary>
     public static Timecode CreateUnchecked(int hours, int minutes, int seconds, int frames, LtcFrameRate rate) => new(hours, minutes, seconds, frames, rate, false);
@@ -42,7 +47,8 @@ public readonly struct Timecode : IEquatable<Timecode>, IComparable<Timecode>
     public int Seconds { get; }
     /// <summary>Frame number (frame-pair number above 30 fps).</summary>
     public int Frames { get; }
-    public LtcFrameRate Rate { get; }
+    /// <summary>The frame rate. 30 fps for <c>default(Timecode)</c>.</summary>
+    public LtcFrameRate Rate => (LtcFrameRate)(_rate ^ (int)LtcFrameRate.Fps30);
 
     /// <summary>00:00:00:00 at the given rate.</summary>
     public static Timecode Zero(LtcFrameRate rate) => new(0, 0, 0, 0, rate, false);
@@ -203,8 +209,19 @@ public readonly struct Timecode : IEquatable<Timecode>, IComparable<Timecode>
     public override bool Equals(object? obj) => obj is Timecode t && Equals(t);
     public override int GetHashCode() => HashCode.Combine(Hours, Minutes, Seconds, Frames, Rate);
 
-    /// <summary>Orders by address (rates are not converted).</summary>
-    public int CompareTo(Timecode other) => TotalFrames.CompareTo(other.TotalFrames);
+    /// <summary>
+    /// Orders by the real time elapsed since 00:00:00:00 (<see cref="ToTimeSpan"/>), compared exactly, so addresses at
+    /// different rates are ordered by when they occur. At one rate this is address order. Addresses at different rates
+    /// can compare as 0 while not being <see cref="Equals(Timecode)"/>, which also compares the rate.
+    /// </summary>
+    public int CompareTo(Timecode other)
+    {
+        if (Rate == other.Rate) return TotalFrames.CompareTo(other.TotalFrames);
+        // TotalFrames × den / num seconds each; cross-multiply to compare without rounding (fits in a long).
+        long a = (long)TotalFrames * Rate.RateDenominator() * other.Rate.CodewordRateNumerator();
+        long b = (long)other.TotalFrames * other.Rate.RateDenominator() * Rate.CodewordRateNumerator();
+        return a.CompareTo(b);
+    }
 
     public static bool operator ==(Timecode a, Timecode b) => a.Equals(b);
     public static bool operator !=(Timecode a, Timecode b) => !a.Equals(b);

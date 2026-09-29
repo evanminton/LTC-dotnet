@@ -53,9 +53,15 @@ public sealed record AuxiliaryTimeAddress
     public DirectoryIndex Index => DirectoryIndex.ForAuxiliaryHours(Timecode.Hours);
 
     /// <summary>Encodes into the 32 user bits (use with BGF 101).</summary>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// A field doesn't fit its digits: frames tens above 3 would spill into the flags, seconds or minutes tens above 7
+    /// into the unassigned bits, and hours outside 00–23 aren't an auxiliary time address directory index.
+    /// </exception>
     public UserBits ToUserBits()
     {
         var tc = Timecode;
+        if (tc.Frames is < 0 or > 39 || tc.Seconds is < 0 or > 79 || tc.Minutes is < 0 or > 79 || tc.Hours is < 0 or > 23)
+            throw new ArgumentOutOfRangeException(nameof(Timecode), $"Auxiliary time address {tc} can't be written in the RP 169 layout.");
         int bg2 = (tc.Frames / 10) | (DropFrame ? 4 : 0) | (ColorFrame ? 8 : 0);
         return UserBits.FromGroups(
         [
