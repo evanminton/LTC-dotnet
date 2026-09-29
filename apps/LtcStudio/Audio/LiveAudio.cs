@@ -13,6 +13,9 @@ namespace LtcStudio.Audio;
 public sealed class LiveReader : IDisposable
 {
     private readonly object _lock = new();
+    // Serialises Start/Stop: two overlapping starts (e.g. a rate change, then a device change) would otherwise both
+    // store their device, and the first would keep playing with nothing left to stop it.
+    private readonly object _startGate = new();
     private MMDevice? _device;
     private WasapiCapture? _capture;
     private LtcDecoder? _decoder;
@@ -79,6 +82,11 @@ public sealed class LiveReader : IDisposable
     /// <summary>Opens the endpoint and starts decoding. Call from a background thread (WASAPI setup blocks briefly).</summary>
     public void Start(AudioEndpoint endpoint, int channel)
     {
+        lock (_startGate) StartCore(endpoint, channel);
+    }
+
+    private void StartCore(AudioEndpoint endpoint, int channel)
+    {
         Stop();
         var device = AudioDevices.Open(endpoint.Id);
         WasapiCapture capture;
@@ -129,6 +137,11 @@ public sealed class LiveReader : IDisposable
 
     /// <summary>Stops capture and releases the device.</summary>
     public void Stop()
+    {
+        lock (_startGate) StopCore();
+    }
+
+    private void StopCore()
     {
         WasapiCapture? capture;
         MMDevice? device;
@@ -211,6 +224,9 @@ public sealed record OutputChannel(int Channel, string Name)
 public sealed class LiveGenerator : IDisposable
 {
     private readonly object _lock = new();
+    // Serialises Start/Stop: two overlapping starts (e.g. a rate change, then a device change) would otherwise both
+    // store their device, and the first would keep playing with nothing left to stop it.
+    private readonly object _startGate = new();
     private MMDevice? _device;
     private WasapiOut? _out;
     private LtcGenerator? _generator;
@@ -255,6 +271,11 @@ public sealed class LiveGenerator : IDisposable
     /// </summary>
     public void Start(AudioEndpoint endpoint, int channel, int latencyMs, Func<int, TimeSpan, LtcGenerator> create)
     {
+        lock (_startGate) StartCore(endpoint, channel, latencyMs, create);
+    }
+
+    private void StartCore(AudioEndpoint endpoint, int channel, int latencyMs, Func<int, TimeSpan, LtcGenerator> create)
+    {
         Stop();
         var device = AudioDevices.Open(endpoint.Id);
         WasapiOut? output = null;
@@ -296,6 +317,11 @@ public sealed class LiveGenerator : IDisposable
 
     /// <summary>Stops playback and releases the device.</summary>
     public void Stop()
+    {
+        lock (_startGate) StopCore();
+    }
+
+    private void StopCore()
     {
         WasapiOut? output;
         MMDevice? device;

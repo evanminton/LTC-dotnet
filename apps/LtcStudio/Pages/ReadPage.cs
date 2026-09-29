@@ -42,11 +42,11 @@ public class ReadPage : ContentPage
             {
                 Children =
                 {
-                    Ui.Button("Open WAVâ€¦", async (_, _) => await PickAsync()),
+                    Ui.Button("Open WAV…", async (_, _) => await PickAsync()),
                     Ui.Button("Use last generated", async (_, _) =>
                     {
                         if (AppState.LastGeneratedPath is { } p) { _path = p; await DecodeAsync(); }
-                        else _status.Text = "Nothing generated yet â€” use the WAV Generate tab.";
+                        else _status.Text = "Nothing generated yet — use the WAV Generate tab.";
                     }),
                     Ui.Button("Decode again", async (_, _) => await DecodeAsync()),
                 },
@@ -62,7 +62,7 @@ public class ReadPage : ContentPage
             Ui.Heading("Summary"),
             Ui.Panel(_summary),
             Ui.Heading("Frames"),
-            Ui.Caption("time in file Â· time code Â· direction Â· speed Â· user bits Â· BGF Â· flags"),
+            Ui.Caption("time in file · time code · direction · speed · user bits · BGF · flags"),
             _frames);
     }
 
@@ -94,7 +94,7 @@ public class ReadPage : ContentPage
         if (_path is null) { _status.Text = "Pick a file first."; return; }
         string path = _path;
         int id = ++_decodeId;
-        _status.Text = $"Decoding {Path.GetFileName(path)}â€¦";
+        _status.Text = $"Decoding {Path.GetFileName(path)}…";
         LtcFrameRate? rate = Ui.SelectedRate(_rate, withAuto: true);
         int channel = int.TryParse(_channel.Text, out int c) ? c : 1;
         double minLevel = Math.Pow(10, _minLevel.Value / 20);
@@ -105,7 +105,7 @@ public class ReadPage : ContentPage
             var (summary, list) = await Task.Run(() =>
             {
                 var wav = WavFile.Read(path);
-                if (channel < 1 || channel > wav.ChannelCount) throw new InvalidDataException($"Channel {channel} out of range 1â€“{wav.ChannelCount}.");
+                if (channel < 1 || channel > wav.ChannelCount) throw new InvalidDataException($"Channel {channel} out of range 1–{wav.ChannelCount}.");
                 var decoder = new LtcDecoder(wav.SampleRate, rate) { MinimumLevel = minLevel };
                 var frames = decoder.Process(wav.Channels[channel - 1]);
                 return (Summarize(path, wav, decoder, frames, rate is null), all ? List(frames, wav.SampleRate) : "");
@@ -129,8 +129,8 @@ public class ReadPage : ContentPage
         if (frames.Count == 0) { sb.AppendLine("No LTC found."); return sb.ToString(); }
         var first = frames[0];
         var last = frames[^1];
-        sb.AppendLine($"Frames      {frames.Count}   {first.Timecode} â†’ {last.Timecode}");
-        sb.AppendLine($"Rate        {(detected ? "detected " : "")}{decoder.DetectedRate?.DisplayName()} fps â€” {decoder.DetectedRate?.Description()}");
+        sb.AppendLine($"Frames      {frames.Count}   {first.Timecode} → {last.Timecode}");
+        sb.AppendLine($"Rate        {(detected ? "detected " : "")}{decoder.DetectedRate?.DisplayName()} fps — {decoder.DetectedRate?.Description()}");
         sb.AppendLine(CultureInfo.InvariantCulture, $"Measured    {decoder.MeasuredCodewordRate:0.####} codewords/s   speed x{Math.Abs(last.Speed):0.0000}   {last.Direction}");
         sb.AppendLine($"Jumps       {frames.Skip(1).Count(f => !f.IsContinuous)}");
         sb.AppendLine($"User bits   {last.Frame.UserBits.ToDisplayString()}   \"{last.Frame.UserBits.ToText()}\"");
@@ -145,7 +145,7 @@ public class ReadPage : ContentPage
             foreach (var m in PageLineMessageLayout.Default.Decode(pageLine).DistinctBy(x => (x.MessageId, x.Text)).Take(10))
                 sb.AppendLine($"Message     {m}  (layout 3.0/3.1/3.2)");
         }
-        sb.AppendLine($"Color frame {(last.Frame.ColorFrame ? "set â€” " + ColorFraming.Describe(last.Timecode) : "not set")}");
+        sb.AppendLine($"Color frame {(last.Frame.ColorFrame ? "set — " + ColorFraming.Describe(last.Timecode) : "not set")}");
         sb.AppendLine($"Polarity    {(frames.All(f => f.Frame.PolarityCorrection) ? "corrected (even zeros in every codeword)" : "not corrected in some codewords")}");
         int issues = frames.Count(f => f.Issues.Count > 0);
         if (issues > 0) sb.AppendLine($"Issues      {issues} frame(s): {string.Join("; ", frames.SelectMany(f => f.Issues).Distinct().Take(3))}");
@@ -158,9 +158,9 @@ public class ReadPage : ContentPage
         foreach (var (i, f) in frames.Take(5000).Index())
         {
             sb.AppendLine(CultureInfo.InvariantCulture,
-                $"{f.StartSample / sampleRate,9:0.000}s  {f.Timecode}  {(f.Direction == LtcDirection.Reverse ? "REV" : "FWD")} x{Math.Abs(f.Speed):0.000}  {f.Frame.UserBits.ToDisplayString()}  {f.Frame.BinaryGroupFlags.BitPattern()}{(f.Frame.ColorFrame ? " CF" : "")}  {UserBitsDescriber.Summary(f.Frame.UserBits, f.Frame.BinaryGroupFlags, f.Frame.Rate)}{(f.IsContinuous || i == 0 ? "" : "  â† jump")}");
+                $"{f.StartSample / sampleRate,9:0.000}s  {f.Timecode}  {(f.Direction == LtcDirection.Reverse ? "REV" : "FWD")} x{Math.Abs(f.Speed):0.000}  {f.Frame.UserBits.ToDisplayString()}  {f.Frame.BinaryGroupFlags.BitPattern()}{(f.Frame.ColorFrame ? " CF" : "")}  {UserBitsDescriber.Summary(f.Frame.UserBits, f.Frame.BinaryGroupFlags, f.Frame.Rate)}{(f.IsContinuous || i == 0 ? "" : "  ← jump")}");
         }
-        if (frames.Count > 5000) sb.AppendLine($"â€¦ {frames.Count - 5000} more");
+        if (frames.Count > 5000) sb.AppendLine($"… {frames.Count - 5000} more");
         return sb.ToString();
     }
 }

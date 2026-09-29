@@ -290,10 +290,18 @@ public class LiveGeneratorPage : ContentPage
     {
         var ep = SelectedEndpoint;
         if (ep is null) { Status("Choose an output first."); return; }
-        if (!TryBuildFrame(out var content, out string? error)) { Status(error!); return; }
+        string? error = null;
         var rate = Rate;
-        Timecode start = content.Timecode;
-        if (!TimeOfDay && !Timecode.TryParse(_startTc.Text, rate, out start, out error)) { Status(error ?? "Invalid start time code."); return; }
+        Timecode start = default;
+        if (!TryBuildFrame(out var content, out error) ||
+            (!TimeOfDay && !Timecode.TryParse(_startTc.Text, rate, out start, out error)))
+        {
+            error ??= "Invalid start time code.";
+            // A restart that can't go ahead leaves the old generator playing; say at which rate.
+            Status(_gen.IsRunning ? $"{error} Still playing at {_gen.Get(g => g.Rate).DisplayName()} fps." : error);
+            return;
+        }
+        if (TimeOfDay) start = content.Timecode;
 
         int channel = _channel.SelectedIndex >= 0 && _channel.SelectedIndex < _channels.Count ? _channels[_channel.SelectedIndex].Channel : -1;
         int latencyMs = LatencyMs;
@@ -329,7 +337,9 @@ public class LiveGeneratorPage : ContentPage
     private void Locate(string? text)
     {
         if (!_gen.IsRunning) { Status("Start the output first."); return; }
-        if (!Timecode.TryParse(text, Rate, out var tc, out string? error)) { Status(error ?? "Invalid time code."); return; }
+        // Parse at the rate actually playing: after a failed restart the picker can show a rate the generator isn't using.
+        var rate = _gen.Get(g => g.Rate);
+        if (!Timecode.TryParse(text, rate, out var tc, out string? error)) { Status(error ?? "Invalid time code."); return; }
         _gen.Use(g => g.NextFrame = g.NextFrame with { Timecode = tc });
         Log($"Located to {tc}.");
     }
@@ -408,8 +418,10 @@ public class LiveGeneratorPage : ContentPage
         Status(notes.Count > 0 ? string.Join("\n", notes) : _gen.IsRunning ? "Settings applied." : "");
         _gen.Use(g =>
         {
-            g.NextFrame = content with { Timecode = g.NextFrame.Timecode };
+            // Configure first: a Reverse change re-steps the next frame from the one playing, which it can only do
+            // while NextFrame hasn't been set for this codeword. Then keep that address and apply the new content.
             Configure(g, content);
+            g.NextFrame = content with { Timecode = g.NextFrame.Timecode };
         });
     }
 
