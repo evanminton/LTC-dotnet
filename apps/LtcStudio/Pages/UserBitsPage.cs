@@ -30,7 +30,7 @@ public class UserBitsPage : ContentPage
     private readonly Entry _text = new() { Text = "REEL", MaxLength = 4 };
 
     // ST 309
-    private readonly DatePicker _date = new() { Date = DateTime.Today, Format = "yyyy-MM-dd" };
+    private readonly DatePicker _date = new() { Date = DateTime.Today, Format = "yyyy-MM-dd" }; // YYMMDD (MJD off): the local date
     private readonly Picker _tz = new() { ItemsSource = TimeZoneCode.All.Select(z => $"{z.Hex}  {z.Description}").ToList() };
     private readonly Switch _dst = Ui.Toggle();
     private readonly Switch _mjd = Ui.Toggle();
@@ -69,10 +69,15 @@ public class UserBitsPage : ContentPage
         _dst.IsToggled = TimeZoneInfo.Local.IsDaylightSavingTime(DateTime.Now);
         _today = Ui.Button("Now (local clock)", (_, _) =>
         {
-            _date.Date = DateTime.Today;
             _tz.SelectedIndex = (TimeZoneCode.FromOffset(DateTimeOffset.Now.Offset) ?? TimeZoneCode.Utc).Code;
             _dst.IsToggled = TimeZoneInfo.Local.IsDaylightSavingTime(DateTime.Now);
+            _date.Date = CurrentDate(_mjd.IsToggled);
         });
+        // ST 309 §5.1.1: an MJD date is the UTC date. Switching the format moves a "today" date to the new format's today.
+        _mjd.Toggled += (_, e) =>
+        {
+            if (_date.Date is { } d && d.Date == CurrentDate(!e.Value)) _date.Date = CurrentDate(e.Value);
+        };
 
         _mode.SelectedIndexChanged += (_, _) => { BuildFields(); Update(); };
         foreach (var e in new[] { _hex, _text, _index, _bytes, _controlLine, _command, _aux, _message, _messageId, _prefix, _msgIndex, _suffix }) e.TextChanged += (_, _) => Update();
@@ -93,6 +98,16 @@ public class UserBitsPage : ContentPage
 
         BuildFields();
         Update();
+    }
+
+    // Today's date for ST 309: the UTC date for MJD, else the date at the selected time zone (the time address is that
+    // zone's local time).
+    private DateTime CurrentDate(bool mjd)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (mjd) return now.UtcDateTime.Date;
+        var offset = TimeZoneCode.All[Math.Max(0, _tz.SelectedIndex)].Offset;
+        return offset is { } o ? now.ToOffset(o).Date : now.ToLocalTime().Date;
     }
 
     private void BuildFields()
